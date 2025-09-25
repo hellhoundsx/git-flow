@@ -51,10 +51,7 @@ interface LaneConnectionState {
 
 interface ConnectionLine {
   id: string;
-  x1: number;
-  y1: number;
-  x2: number;
-  y2: number;
+  path: string;
   color: string;
 }
 
@@ -237,12 +234,14 @@ export const CommitGraph: React.FC<CommitGraphProps> = ({
       const x2 = toElement.offsetLeft + toElement.offsetWidth / 2;
       const y2 = toElement.offsetTop + toElement.offsetHeight / 2;
 
+      const sameLane = Math.abs(x1 - x2) < 1;
+      const path = sameLane
+        ? `M ${x1} ${y1} L ${x2} ${y2}`
+        : `M ${x1} ${y1} V ${y2} H ${x2}`;
+
       lines.push({
         id: connection.id,
-        x1,
-        y1,
-        x2,
-        y2,
+        path,
         color: connection.color
       });
     });
@@ -503,15 +502,14 @@ export const CommitGraph: React.FC<CommitGraphProps> = ({
                 viewBox={`0 0 ${graphDimensions.width} ${graphDimensions.height}`}
               >
                 {connectionLines.map((line) => (
-                  <line
+                  <path
                     key={line.id}
-                    x1={line.x1}
-                    y1={line.y1}
-                    x2={line.x2}
-                    y2={line.y2}
+                    d={line.path}
                     stroke={line.color}
                     strokeWidth={4}
                     strokeLinecap="round"
+                    strokeLinejoin="round"
+                    fill="none"
                     opacity={0.45}
                   />
                 ))}
