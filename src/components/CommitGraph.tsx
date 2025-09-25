@@ -190,6 +190,7 @@ export const CommitGraph: React.FC<CommitGraphProps> = ({
   }, [sortedCommits, commitLaneMap]);
 
   // SVG connection lines
+  const CORNER_RADIUS = 10;
   const svgConnections = useMemo(() => {
     const lines: { id: string; path: string; color: string }[] = [];
     // Draw vertical lines for each lane (continuous)
@@ -209,36 +210,72 @@ export const CommitGraph: React.FC<CommitGraphProps> = ({
         }
       });
     });
-    // Draw connections (forks and merges)
+    // Draw connections (forks and merges) with 90-degree turns and rounded corners (outside)
     connections.forEach((connection) => {
       const fromPos = nodePositions[sortedCommits[connection.fromIndex].id];
       const toPos = nodePositions[sortedCommits[connection.toIndex].id];
       if (!fromPos || !toPos) return;
       const isBranchStart = branchLanes[toPos.lane]?.firstCommitIndex === connection.toIndex && fromPos.lane !== toPos.lane;
       if (isBranchStart) {
-        // Branch start: fork at parent node's Y position
+        // Branch start: fork at parent node's Y position, 90-degree turn with rounded corner (outside)
+        const horizontalDir = Math.sign(toPos.x - fromPos.x);
+        const verticalDir = Math.sign(toPos.y - fromPos.y);
+        const cornerX = toPos.x;
+        const cornerY = fromPos.y;
+        // Move horizontally, stop CORNER_RADIUS before the turn
+        const hStopX = cornerX - horizontalDir * CORNER_RADIUS;
+        // Move vertically, start CORNER_RADIUS after the turn
+        const vStartY = cornerY + verticalDir * CORNER_RADIUS;
+        // Sweep flag: 1 if both directions are the same (right-down, left-up), else 0
+        const arcSweep = (horizontalDir === 1 && verticalDir === 1) || (horizontalDir === -1 && verticalDir === -1) ? 1 : 0;
         lines.push({
           id: connection.id + '-branch-h',
-          path: `M ${fromPos.x} ${fromPos.y} H ${toPos.x}`,
+          path: `M ${fromPos.x} ${fromPos.y} H ${hStopX}`,
           color: connection.color
         });
+
+        // Arc for the outside corner
+        lines.push({
+          id: connection.id + '-branch-arc',
+          path: `M ${hStopX} ${cornerY} A ${CORNER_RADIUS} ${CORNER_RADIUS} 0 0 ${arcSweep} ${cornerX} ${vStartY}`,
+          color: connection.color
+        });
+        // Vertical segment
         lines.push({
           id: connection.id + '-branch-v',
-          path: `M ${toPos.x} ${fromPos.y} V ${toPos.y}`,
+          path: `M ${cornerX} ${vStartY} V ${toPos.y}`,
           color: connection.color
         });
       } else if (fromPos.lane === toPos.lane) {
         // Already handled by vertical lane lines above
       } else {
-        // Merge: horizontal at child Y, then vertical up to parent
-        lines.push({
-          id: connection.id + '-merge-h',
-          path: `M ${fromPos.x} ${toPos.y} H ${toPos.x}`,
-          color: connection.color
-        });
+        // Merge: 90-degree turn at child Y with rounded corner (outside)
+        const horizontalDir = Math.sign(toPos.x - fromPos.x);
+        const verticalDir = Math.sign(toPos.y - fromPos.y);
+        const cornerX = toPos.x;
+        const cornerY = toPos.y;
+        // Move vertically, stop CORNER_RADIUS before the turn
+        const vStopY = cornerY - verticalDir * CORNER_RADIUS;
+        // Move horizontally, start CORNER_RADIUS after the turn
+        const hStartX = fromPos.x + horizontalDir * CORNER_RADIUS;
+        // Sweep flag: 1 for right-down, left-up; 0 for right-up, left-down
+        // For outside arc, sweep = (horizontalDir !== verticalDir ? 1 : 0)
+        const arcSweep = horizontalDir !== verticalDir ? 1 : 0;
         lines.push({
           id: connection.id + '-merge-v',
-          path: `M ${fromPos.x} ${fromPos.y} V ${toPos.y}`,
+          path: `M ${fromPos.x} ${fromPos.y} V ${vStopY}`,
+          color: connection.color
+        });
+        // Arc for the outside corner
+        lines.push({
+          id: connection.id + '-merge-arc',
+          path: `M ${fromPos.x} ${vStopY} A ${CORNER_RADIUS} ${CORNER_RADIUS} 0 0 ${arcSweep} ${hStartX} ${cornerY}`,
+          color: connection.color
+        });
+        // Horizontal segment
+        lines.push({
+          id: connection.id + '-merge-h',
+          path: `M ${hStartX} ${cornerY} H ${cornerX}`,
           color: connection.color
         });
       }
@@ -366,7 +403,7 @@ export const CommitGraph: React.FC<CommitGraphProps> = ({
                   strokeLinecap="round"
                   strokeLinejoin="round"
                   fill="none"
-                  opacity={0.7}
+                  opacity={1}
                 />
               ))}
             </svg>
