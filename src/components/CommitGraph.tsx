@@ -73,6 +73,7 @@ const getBranchColor = (branchName: string): string => {
 
 export const CommitGraph: React.FC<CommitGraphProps> = ({
   commits,
+  branches,
   onCommitClick
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -448,8 +449,6 @@ export const CommitGraph: React.FC<CommitGraphProps> = ({
     });
 
     return markers;
-    // Including `branches` keeps the markers in sync with updates from the dashboard data source.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [branches, branchColors, branchHeadsByName, sortedCommits]);
 
   const registerNodeRef = useCallback(
