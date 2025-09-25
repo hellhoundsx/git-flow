@@ -1,4 +1,4 @@
-import { GitCommit, GitBranch, GitRemote, GitStatus, GitStash } from '../types/git';
+import { GitCommit, GitBranch, GitRemote, GitStatus } from '../types/git';
 
 // Mock Git service to simulate real Git operations
 export class MockGitService {

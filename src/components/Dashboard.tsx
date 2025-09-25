@@ -1,6 +1,6 @@
 import React from 'react';
 import { GitStatus, GitBranch } from '../types/git';
-import { GitBranch as BranchIcon, GitCommitVertical as GitCommit, Upload, Download, Clock, FileText, Plus, Minus } from 'lucide-react';
+import { GitBranch as BranchIcon, GitCommitVertical as GitCommit, Upload, Download, Clock, FileText, Plus } from 'lucide-react';
 
 interface DashboardProps {
   status: GitStatus;

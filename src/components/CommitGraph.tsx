@@ -35,6 +35,12 @@ export const CommitGraph: React.FC<CommitGraphProps> = ({
   onRevert,
   onCreateBranch
 }) => {
+  const LANE_SPACING = 56;
+  const VERTICAL_SPACING = 80;
+  const NODE_VERTICAL_OFFSET = 40;
+  const NODE_RADIUS = 20;
+  const CONNECTION_RADIUS = 18;
+
   const [contextMenu, setContextMenu] = useState<ContextMenuState>({
     show: false,
     x: 0,
@@ -79,10 +85,10 @@ export const CommitGraph: React.FC<CommitGraphProps> = ({
     
     sortedCommits.forEach((commit, index) => {
       const primaryBranch = commit.branches[0] || 'main';
-      
+
       // Find existing lane for this branch or create new one
       let laneIndex = lanes.findIndex(lane => lane.name === primaryBranch);
-      
+
       if (laneIndex === -1) {
         // Create new lane
         laneIndex = lanes.length;
@@ -101,8 +107,8 @@ export const CommitGraph: React.FC<CommitGraphProps> = ({
       
       const node: CommitGraphNode = {
         commit,
-        x: laneIndex * 60 + 30,
-        y: index * 80 + 40,
+        x: laneIndex * LANE_SPACING + LANE_SPACING / 2,
+        y: index * VERTICAL_SPACING + NODE_VERTICAL_OFFSET,
         lane: laneIndex,
         connections: commit.parents.map(parentId => ({
           to: parentId,
@@ -142,20 +148,20 @@ export const CommitGraph: React.FC<CommitGraphProps> = ({
         const startY = node.y;
         const endX = targetNode.x;
         const endY = targetNode.y;
-        
+
         const color = getBranchColor(node.commit.branches[0] || 'main');
         const strokeWidth = connection.type === 'merge' ? 3 : 2;
         const opacity = connection.type === 'merge' ? 0.8 : 0.6;
-        
+
         if (startX === endX) {
           // Straight line for same lane
           connections.push(
             <line
               key={`${node.commit.id}-${connection.to}`}
               x1={startX}
-              y1={startY + 20}
+              y1={startY + NODE_RADIUS}
               x2={endX}
-              y2={endY - 20}
+              y2={endY - NODE_RADIUS}
               stroke={color}
               strokeWidth={strokeWidth}
               opacity={opacity}
@@ -163,10 +169,63 @@ export const CommitGraph: React.FC<CommitGraphProps> = ({
             />
           );
         } else {
-          // Curved line for different lanes (merges)
-          const midY = (startY + endY) / 2;
-          const path = `M ${startX} ${startY + 20} Q ${startX} ${midY} ${endX} ${endY - 20}`;
-          
+          // 90-degree styled connection for different lanes
+          const startYAdjusted = startY + NODE_RADIUS;
+          const endYAdjusted = endY - NODE_RADIUS;
+          const verticalDirection = endYAdjusted >= startYAdjusted ? 1 : -1;
+          const horizontalDirection = endX > startX ? 1 : -1;
+          const horizontalDistance = Math.abs(endX - startX);
+          const verticalDistance = Math.abs(endYAdjusted - startYAdjusted);
+
+          const maxVerticalCorner = Math.max(verticalDistance / 2 - 4, 0);
+          let cornerRadius = Math.min(
+            CONNECTION_RADIUS,
+            horizontalDistance / 2,
+            maxVerticalCorner
+          );
+
+          if (cornerRadius < 6 && maxVerticalCorner >= 6) {
+            cornerRadius = Math.min(6, horizontalDistance / 2);
+          }
+
+          if (cornerRadius <= 0) {
+            const midY = (startYAdjusted + endYAdjusted) / 2;
+            const path = [
+              `M ${startX} ${startYAdjusted}`,
+              `L ${startX} ${midY}`,
+              `L ${endX} ${midY}`,
+              `L ${endX} ${endYAdjusted}`
+            ].join(' ');
+
+            connections.push(
+              <path
+                key={`${node.commit.id}-${connection.to}`}
+                d={path}
+                stroke={color}
+                strokeWidth={strokeWidth}
+                opacity={opacity}
+                fill="none"
+                className="transition-all duration-200"
+              />
+            );
+            return;
+          }
+
+          const midY = (startYAdjusted + endYAdjusted) / 2;
+          const firstCornerY = midY - verticalDirection * cornerRadius;
+          const secondCornerY = midY + verticalDirection * cornerRadius;
+          const firstCornerX = startX + horizontalDirection * cornerRadius;
+          const secondCornerX = endX - horizontalDirection * cornerRadius;
+
+          const path = [
+            `M ${startX} ${startYAdjusted}`,
+            `L ${startX} ${firstCornerY}`,
+            `Q ${startX} ${midY} ${firstCornerX} ${midY}`,
+            `L ${secondCornerX} ${midY}`,
+            `Q ${endX} ${midY} ${endX} ${secondCornerY}`,
+            `L ${endX} ${endYAdjusted}`
+          ].join(' ');
+
           connections.push(
             <path
               key={`${node.commit.id}-${connection.to}`}
@@ -190,7 +249,7 @@ export const CommitGraph: React.FC<CommitGraphProps> = ({
       <div
         key={lane.name}
         className="absolute top-0 bottom-0 flex flex-col items-center"
-        style={{ left: index * 60 + 30, width: 60 }}
+        style={{ left: index * LANE_SPACING + LANE_SPACING / 2, width: LANE_SPACING }}
       >
         {/* Branch line */}
         <div
@@ -212,8 +271,10 @@ export const CommitGraph: React.FC<CommitGraphProps> = ({
     return () => document.removeEventListener('click', handleClick);
   }, [contextMenu.show, handleCloseContextMenu]);
 
-  const maxX = Math.max(...graphNodes.map(n => n.x)) + 200;
-  const maxY = Math.max(...graphNodes.map(n => n.y)) + 100;
+  const maxNodeX = graphNodes.length > 0 ? Math.max(...graphNodes.map(n => n.x)) : 0;
+  const maxNodeY = graphNodes.length > 0 ? Math.max(...graphNodes.map(n => n.y)) : 0;
+  const maxX = maxNodeX + 200;
+  const maxY = maxNodeY + 100;
   const branchColumnWidth = 200;
 
   return (
@@ -235,11 +296,11 @@ export const CommitGraph: React.FC<CommitGraphProps> = ({
             <div
               key={lane.name}
               className="absolute flex items-center px-4 py-2"
-              style={{ 
-                top: 40,
+              style={{
+                top: NODE_VERTICAL_OFFSET,
                 left: 0,
                 right: 0,
-                transform: `translateY(${index * 80}px)`
+                transform: `translateY(${index * VERTICAL_SPACING}px)`
               }}
             >
               <div
