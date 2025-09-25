@@ -21,13 +21,6 @@ interface ContextMenuState {
   commit: GitCommit | null;
 }
 
-interface BranchLane {
-  name: string;
-  color: string;
-  firstCommitIndex: number;
-  lastCommitIndex: number;
-}
-
 interface GraphConnection {
   id: string;
   fromIndex: number;
@@ -35,12 +28,17 @@ interface GraphConnection {
   fromLane: number;
   toLane: number;
   color: string;
+  type: 'branch' | 'merge';
 }
 
-interface LaneConnectionState {
-  incoming: GraphConnection[];
-  outgoing: GraphConnection[];
-  passing: GraphConnection[];
+interface CommitLaneInfo {
+  lane: number;
+  branch: string;
+}
+
+interface BranchLegendEntry {
+  name: string;
+  color: string;
 }
 
 const LANE_COLUMN_WIDTH = 72;
@@ -89,96 +87,161 @@ export const CommitGraph: React.FC<CommitGraphProps> = ({
   );
 
   // Calculate lanes and connections
-  const { branchLanes, commitLaneMap, connections } = useMemo(() => {
-    const lanes: BranchLane[] = [];
-    const laneIndexByName: Record<string, number> = {};
-    const laneMap: Record<string, number> = {};
+  const {
+    commitLaneInfo,
+    laneCount,
+    branchLegend,
+    connections
+  } = useMemo(() => {
     const commitIndexMap: Record<string, number> = {};
-
     sortedCommits.forEach((commit, index) => {
-      const primaryBranch = commit.branches[0] || 'detached';
       commitIndexMap[commit.id] = index;
-
-      if (laneIndexByName[primaryBranch] === undefined) {
-        laneIndexByName[primaryBranch] = lanes.length;
-        lanes.push({
-          name: primaryBranch,
-          color: getBranchColor(primaryBranch),
-          firstCommitIndex: index,
-          lastCommitIndex: index
-        });
-      } else {
-        const lane = lanes[laneIndexByName[primaryBranch]];
-        lane.lastCommitIndex = Math.max(lane.lastCommitIndex, index);
-      }
-
-      laneMap[commit.id] = laneIndexByName[primaryBranch];
     });
 
-    const connectionStates: LaneConnectionState[][] = sortedCommits.map(() =>
-      lanes.map(() => ({ incoming: [], outgoing: [], passing: [] }))
-    );
+    const chronologicalCommits = [...sortedCommits].reverse();
+    const laneBranchNames: (string | null)[] = [];
+    laneBranchNames[0] = 'main';
+
+    const branchLaneMap = new Map<string, number>();
+    branchLaneMap.set('main', 0);
+    branchLaneMap.set('master', 0);
+
+    const isMainBranch = (branch: string) => branch === 'main' || branch === 'master';
+
+    const findFreeLane = () => {
+      for (let laneIndex = 1; laneIndex < laneBranchNames.length; laneIndex += 1) {
+        if (!laneBranchNames[laneIndex]) {
+          return laneIndex;
+        }
+      }
+      laneBranchNames.push(null);
+      return laneBranchNames.length - 1;
+    };
+
+    const commitLaneInfo: Record<string, CommitLaneInfo> = {};
+    const branchColors = new Map<string, string>();
+    const mergeConnections = new Set<string>();
+
+    chronologicalCommits.forEach((commit) => {
+      const branches = commit.branches.length > 0 ? commit.branches : ['detached'];
+      const primaryBranch =
+        branches.find((branch) => isMainBranch(branch)) ?? branches[0] ?? 'detached';
+
+      let laneIndex: number;
+      if (isMainBranch(primaryBranch)) {
+        laneIndex = 0;
+        if (!branchLaneMap.has(primaryBranch)) {
+          branchLaneMap.set(primaryBranch, 0);
+        }
+        if (!laneBranchNames[0]) {
+          laneBranchNames[0] = primaryBranch;
+        }
+      } else {
+        const existingLane = branchLaneMap.get(primaryBranch);
+        if (existingLane !== undefined) {
+          laneIndex = existingLane;
+        } else {
+          laneIndex = findFreeLane();
+          branchLaneMap.set(primaryBranch, laneIndex);
+          laneBranchNames[laneIndex] = primaryBranch;
+        }
+      }
+
+      commitLaneInfo[commit.id] = { lane: laneIndex, branch: primaryBranch };
+      branchColors.set(primaryBranch, getBranchColor(primaryBranch));
+
+      if (!isMainBranch(primaryBranch)) {
+        laneBranchNames[laneIndex] = primaryBranch;
+      }
+
+      if (commit.parents.length > 1) {
+        commit.parents.forEach((parentId) => {
+          const parentInfo = commitLaneInfo[parentId];
+          if (!parentInfo) {
+            return;
+          }
+          if (parentInfo.lane === laneIndex) {
+            return;
+          }
+          if (parentInfo.lane === 0 && isMainBranch(parentInfo.branch)) {
+            return;
+          }
+
+          mergeConnections.add(`${commit.id}->${parentId}`);
+          branchLaneMap.delete(parentInfo.branch);
+          laneBranchNames[parentInfo.lane] = null;
+        });
+      }
+    });
+
+    const laneCount = laneBranchNames.length;
+
+    const branchLegend: BranchLegendEntry[] = Array.from(branchColors.entries())
+      .filter(([name]) => name !== 'detached')
+      .map(([name, color]) => ({ name, color }))
+      .sort((a, b) => {
+        if (isMainBranch(a.name)) return -1;
+        if (isMainBranch(b.name)) return 1;
+        return a.name.localeCompare(b.name);
+      });
 
     const connections: GraphConnection[] = [];
 
     sortedCommits.forEach((commit, fromIndex) => {
-      const fromLane = laneMap[commit.id];
-
-      if (fromLane === undefined) {
+      const fromInfo = commitLaneInfo[commit.id];
+      if (!fromInfo) {
         return;
       }
 
       commit.parents.forEach((parentId) => {
         const toIndex = commitIndexMap[parentId];
+        const toInfo = commitLaneInfo[parentId];
 
-        if (toIndex === undefined) {
+        if (toIndex === undefined || !toInfo) {
           return;
         }
 
-        const toLane = laneMap[parentId] ?? fromLane;
-        const color = lanes[fromLane]?.color ?? '#6B7280';
-        const connection: GraphConnection = {
+        if (fromInfo.lane === toInfo.lane) {
+          return;
+        }
+
+        const key = `${commit.id}->${parentId}`;
+        const type: GraphConnection['type'] = mergeConnections.has(key)
+          ? 'merge'
+          : 'branch';
+
+        const color =
+          type === 'merge'
+            ? getBranchColor(toInfo.branch)
+            : getBranchColor(fromInfo.branch);
+
+        connections.push({
           id: `${commit.id}-${parentId}`,
           fromIndex,
           toIndex,
-          fromLane,
-          toLane,
-          color
-        };
-
-        connections.push(connection);
+          fromLane: fromInfo.lane,
+          toLane: toInfo.lane,
+          color,
+          type
+        });
       });
     });
 
-    connections.forEach((connection) => {
-      const { fromIndex, toIndex, fromLane, toLane } = connection;
-
-      const fromLaneState = connectionStates[fromIndex]?.[fromLane];
-      const toLaneState = connectionStates[toIndex]?.[toLane];
-
-      fromLaneState?.outgoing.push(connection);
-
-      for (let row = fromIndex + 1; row < toIndex; row += 1) {
-        const passingLaneState = connectionStates[row]?.[fromLane];
-        passingLaneState?.passing.push(connection);
-      }
-
-      toLaneState?.incoming.push(connection);
-    });
-
     return {
-      branchLanes: lanes,
-      commitLaneMap: laneMap,
+      commitLaneInfo,
+      laneCount,
+      branchLegend,
       connections
     };
   }, [sortedCommits]);
 
   // Calculate node positions for SVG
   const ROW_HEIGHT = 64;
+  const COMMIT_NODE_RADIUS = 24;
   const nodePositions = useMemo(() => {
     const positions: Record<string, { x: number; y: number; lane: number; row: number }> = {};
     sortedCommits.forEach((commit, rowIndex) => {
-      const laneIndex = commitLaneMap[commit.id];
+      const laneIndex = commitLaneInfo[commit.id]?.lane ?? 0;
       positions[commit.id] = {
         x: laneIndex * LANE_COLUMN_WIDTH + LANE_COLUMN_WIDTH / 2,
         y: rowIndex * ROW_HEIGHT + ROW_HEIGHT / 2,
@@ -187,101 +250,91 @@ export const CommitGraph: React.FC<CommitGraphProps> = ({
       };
     });
     return positions;
-  }, [sortedCommits, commitLaneMap]);
+  }, [sortedCommits, commitLaneInfo]);
 
   // SVG connection lines
-  const CORNER_RADIUS = 10;
   const svgConnections = useMemo(() => {
     const lines: { id: string; path: string; color: string }[] = [];
-    // Draw vertical lines for each lane (continuous)
-    branchLanes.forEach((lane, laneIndex) => {
-      let prevY: number | null = null;
-      sortedCommits.forEach((commit, rowIndex) => {
-        if (commitLaneMap[commit.id] === laneIndex) {
-          const pos = nodePositions[commit.id];
-          if (prevY !== null) {
-            lines.push({
-              id: `lane-${lane.name}-v-${rowIndex}`,
-              path: `M ${pos.x} ${prevY} L ${pos.x} ${pos.y}`,
-              color: lane.color
-            });
-          }
-          prevY = pos.y;
-        }
-      });
-    });
-    // Draw connections (forks and merges) with 90-degree turns and rounded corners (outside)
-    connections.forEach((connection) => {
-      const fromPos = nodePositions[sortedCommits[connection.fromIndex].id];
-      const toPos = nodePositions[sortedCommits[connection.toIndex].id];
-      if (!fromPos || !toPos) return;
-      const isBranchStart = branchLanes[toPos.lane]?.firstCommitIndex === connection.toIndex && fromPos.lane !== toPos.lane;
-      if (isBranchStart) {
-        // Branch start: fork at parent node's Y position, 90-degree turn with rounded corner (outside)
-        const horizontalDir = Math.sign(toPos.x - fromPos.x);
-        const verticalDir = Math.sign(toPos.y - fromPos.y);
-        const cornerX = toPos.x;
-        const cornerY = fromPos.y;
-        // Move horizontally, stop CORNER_RADIUS before the turn
-        const hStopX = cornerX - horizontalDir * CORNER_RADIUS;
-        // Move vertically, start CORNER_RADIUS after the turn
-        const vStartY = cornerY + verticalDir * CORNER_RADIUS;
-        // Sweep flag: 1 if both directions are the same (right-down, left-up), else 0
-        const arcSweep = (horizontalDir === 1 && verticalDir === 1) || (horizontalDir === -1 && verticalDir === -1) ? 1 : 0;
-        lines.push({
-          id: connection.id + '-branch-h',
-          path: `M ${fromPos.x} ${fromPos.y} H ${hStopX}`,
-          color: connection.color
-        });
 
-        // Arc for the outside corner
+    const getAnchors = (pos: { x: number; y: number }) => ({
+      top: { x: pos.x, y: pos.y - COMMIT_NODE_RADIUS },
+      bottom: { x: pos.x, y: pos.y + COMMIT_NODE_RADIUS },
+      left: { x: pos.x - COMMIT_NODE_RADIUS, y: pos.y },
+      right: { x: pos.x + COMMIT_NODE_RADIUS, y: pos.y },
+      center: { x: pos.x, y: pos.y }
+    });
+
+    const laneStates: Record<number, { nextBottom: number; branch: string }> = {};
+
+    sortedCommits.forEach((commit) => {
+      const laneInfo = commitLaneInfo[commit.id];
+      if (!laneInfo) {
+        return;
+      }
+
+      const pos = nodePositions[commit.id];
+      const anchors = getAnchors(pos);
+      const laneState = laneStates[laneInfo.lane];
+
+      if (laneState && laneState.branch === laneInfo.branch) {
         lines.push({
-          id: connection.id + '-branch-arc',
-          path: `M ${hStopX} ${cornerY} A ${CORNER_RADIUS} ${CORNER_RADIUS} 0 0 ${arcSweep} ${cornerX} ${vStartY}`,
-          color: connection.color
-        });
-        // Vertical segment
-        lines.push({
-          id: connection.id + '-branch-v',
-          path: `M ${cornerX} ${vStartY} V ${toPos.y}`,
-          color: connection.color
-        });
-      } else if (fromPos.lane === toPos.lane) {
-        // Already handled by vertical lane lines above
-      } else {
-        // Merge: 90-degree turn at child Y with rounded corner (outside)
-        const horizontalDir = Math.sign(toPos.x - fromPos.x);
-        const verticalDir = Math.sign(toPos.y - fromPos.y);
-        const cornerX = toPos.x;
-        const cornerY = toPos.y;
-        // Move vertically, stop CORNER_RADIUS before the turn
-        const vStopY = cornerY - verticalDir * CORNER_RADIUS;
-        // Move horizontally, start CORNER_RADIUS after the turn
-        const hStartX = fromPos.x + horizontalDir * CORNER_RADIUS;
-        // Sweep flag: 1 for right-down, left-up; 0 for right-up, left-down
-        // For outside arc, sweep = (horizontalDir !== verticalDir ? 1 : 0)
-        const arcSweep = horizontalDir !== verticalDir ? 1 : 0;
-        lines.push({
-          id: connection.id + '-merge-v',
-          path: `M ${fromPos.x} ${fromPos.y} V ${vStopY}`,
-          color: connection.color
-        });
-        // Arc for the outside corner
-        lines.push({
-          id: connection.id + '-merge-arc',
-          path: `M ${fromPos.x} ${vStopY} A ${CORNER_RADIUS} ${CORNER_RADIUS} 0 0 ${arcSweep} ${hStartX} ${cornerY}`,
-          color: connection.color
-        });
-        // Horizontal segment
-        lines.push({
-          id: connection.id + '-merge-h',
-          path: `M ${hStartX} ${cornerY} H ${cornerX}`,
-          color: connection.color
+          id: `lane-${laneInfo.lane}-${commit.id}`,
+          path: `M ${anchors.top.x} ${anchors.top.y} V ${laneState.nextBottom}`,
+          color: getBranchColor(laneInfo.branch)
         });
       }
+
+      laneStates[laneInfo.lane] = {
+        nextBottom: anchors.bottom.y,
+        branch: laneInfo.branch
+      };
     });
+
+    connections.forEach((connection) => {
+      const childCommit = sortedCommits[connection.fromIndex];
+      const parentCommit = sortedCommits[connection.toIndex];
+
+      const childPos = nodePositions[childCommit.id];
+      const parentPos = nodePositions[parentCommit.id];
+
+      if (!childPos || !parentPos) {
+        return;
+      }
+
+      const childAnchors = getAnchors(childPos);
+      const parentAnchors = getAnchors(parentPos);
+
+      const isChildBelowParent = childPos.y > parentPos.y;
+
+      if (connection.type === 'merge') {
+        const startAnchor = isChildBelowParent ? parentAnchors.bottom : parentAnchors.top;
+        const startX = startAnchor.x;
+        const startY = startAnchor.y;
+        const mergeY = childAnchors.right.y;
+        const mergeX = childAnchors.right.x;
+
+        lines.push({
+          id: `${connection.id}-${connection.type}`,
+          path: `M ${startX} ${startY} V ${mergeY} H ${mergeX}`,
+          color: connection.color
+        });
+        return;
+      }
+
+      const startX = parentAnchors.right.x;
+      const startY = parentAnchors.right.y;
+      const endX = childPos.x;
+      const endY = childAnchors.bottom.y;
+
+      lines.push({
+        id: `${connection.id}-${connection.type}`,
+        path: `M ${startX} ${startY} H ${endX} V ${endY}`,
+        color: connection.color
+      });
+    });
+
     return lines;
-  }, [connections, nodePositions, sortedCommits, branchLanes, commitLaneMap]);
+  }, [connections, nodePositions, sortedCommits, commitLaneInfo]);
 
   const registerNodeRef = useCallback(
     (commitId: string) => (element: HTMLDivElement | null) => {
@@ -324,27 +377,26 @@ export const CommitGraph: React.FC<CommitGraphProps> = ({
 
   const timelineColumns = useMemo(
     () =>
-      branchLanes.length > 0
-        ? `repeat(${branchLanes.length}, ${LANE_COLUMN_WIDTH}px)`
-        : '1fr',
-    [branchLanes.length]
+      laneCount > 0 ? `repeat(${laneCount}, ${LANE_COLUMN_WIDTH}px)` : '1fr',
+    [laneCount]
   );
 
-  const renderLaneCell = (
-    commit: GitCommit,
-    lane: BranchLane,
-    laneIndex: number
-  ) => {
-    const commitLane = commitLaneMap[commit.id];
-    const isCommitLane = laneIndex === commitLane;
+  const renderLaneCell = (commit: GitCommit, laneIndex: number) => {
+    const laneInfo = commitLaneInfo[commit.id];
+    const isCommitLane = laneInfo?.lane === laneIndex;
+    const branchColor = laneInfo ? getBranchColor(laneInfo.branch) : '#6B7280';
 
     return (
-      <div key={lane.name} className="relative flex items-center justify-center" style={{ height: ROW_HEIGHT }}>
+      <div
+        key={`lane-${laneIndex}`}
+        className="relative flex items-center justify-center"
+        style={{ height: ROW_HEIGHT }}
+      >
         {isCommitLane && (
           <div ref={registerNodeRef(commit.id)} className="relative z-20 flex items-center justify-center" style={{ height: ROW_HEIGHT }}>
             <CommitNode
               commit={commit}
-              branchColor={lane.color}
+              branchColor={branchColor}
               onClick={() => onCommitClick(commit)}
               onContextMenu={(event) => handleContextMenu(event, commit)}
             />
@@ -365,7 +417,7 @@ export const CommitGraph: React.FC<CommitGraphProps> = ({
             </h3>
           </div>
           <div className="space-y-3 px-4 py-4">
-            {branchLanes.map((lane) => (
+            {branchLegend.map((lane) => (
               <div key={lane.name} className="flex items-center gap-3">
                 <span
                   className="h-3 w-3 rounded-full"
@@ -376,7 +428,7 @@ export const CommitGraph: React.FC<CommitGraphProps> = ({
                 </span>
               </div>
             ))}
-            {branchLanes.length === 0 && (
+            {branchLegend.length === 0 && (
               <div className="text-sm text-gray-500">No branches detected</div>
             )}
           </div>
@@ -390,9 +442,9 @@ export const CommitGraph: React.FC<CommitGraphProps> = ({
             {/* SVG overlay for all connections */}
             <svg
               className="pointer-events-none absolute inset-0 z-10"
-              width={branchLanes.length * LANE_COLUMN_WIDTH}
+              width={laneCount * LANE_COLUMN_WIDTH}
               height={sortedCommits.length * ROW_HEIGHT}
-              viewBox={`0 0 ${branchLanes.length * LANE_COLUMN_WIDTH} ${sortedCommits.length * ROW_HEIGHT}`}
+              viewBox={`0 0 ${laneCount * LANE_COLUMN_WIDTH} ${sortedCommits.length * ROW_HEIGHT}`}
             >
               {svgConnections.map((line) => (
                 <path
@@ -413,9 +465,9 @@ export const CommitGraph: React.FC<CommitGraphProps> = ({
                 className="grid border-b border-gray-800 bg-gray-900/60 hover:bg-gray-900 transition-colors"
                 style={{ gridTemplateColumns: `${timelineColumns} minmax(0, 1fr)`, height: ROW_HEIGHT }}
               >
-                {branchLanes.length > 0 ? (
-                  branchLanes.map((lane, laneIndex) =>
-                    renderLaneCell(commit, lane, laneIndex)
+                {laneCount > 0 ? (
+                  Array.from({ length: laneCount }, (_, laneIndex) =>
+                    renderLaneCell(commit, laneIndex)
                   )
                 ) : (
                   <div style={{ height: ROW_HEIGHT }} />
