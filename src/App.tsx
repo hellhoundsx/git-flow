@@ -46,18 +46,6 @@ function App() {
     }
   };
 
-  const handleCreateBranch = async (fromCommit?: string) => {
-    const branchName = prompt('Enter branch name:');
-    if (!branchName) return;
-
-    try {
-      await gitService.createBranch(branchName, fromCommit);
-      await loadData();
-    } catch (error) {
-      console.error('Failed to create branch:', error);
-    }
-  };
-
   const handlePull = async () => {
     try {
       await gitService.pull();
@@ -73,41 +61,6 @@ function App() {
       await loadData();
     } catch (error) {
       console.error('Failed to push:', error);
-    }
-  };
-
-  const handleReset = async (commitId: string, mode: 'soft' | 'mixed' | 'hard') => {
-    const confirmMessage = `Are you sure you want to ${mode} reset to this commit? This will ${
-      mode === 'hard' ? 'permanently discard all changes' :
-      mode === 'mixed' ? 'unstage all changes' :
-      'keep all changes staged'
-    }.`;
-    
-    if (!confirm(confirmMessage)) return;
-
-    try {
-      await gitService.reset(commitId, mode);
-      await loadData();
-    } catch (error) {
-      console.error('Failed to reset:', error);
-    }
-  };
-
-  const handleCherryPick = async (commitId: string) => {
-    try {
-      await gitService.cherryPick(commitId);
-      await loadData();
-    } catch (error) {
-      console.error('Failed to cherry-pick:', error);
-    }
-  };
-
-  const handleRevert = async (commitId: string) => {
-    try {
-      await gitService.revert(commitId);
-      await loadData();
-    } catch (error) {
-      console.error('Failed to revert:', error);
     }
   };
 
@@ -140,11 +93,8 @@ function App() {
         
         <CommitGraph
           commits={commits}
+          branches={branches}
           onCommitClick={setSelectedCommit}
-          onReset={handleReset}
-          onCherryPick={handleCherryPick}
-          onRevert={handleRevert}
-          onCreateBranch={handleCreateBranch}
         />
         
         {selectedCommit && (
