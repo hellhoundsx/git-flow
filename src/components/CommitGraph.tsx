@@ -3,21 +3,15 @@ import React, {
   useState,
   useCallback,
   useRef,
-  useEffect,
-  useLayoutEffect
+  useEffect
 } from 'react';
 import { GitCommit } from '../types/git';
 import { CommitNode } from './CommitNode';
-import { ContextMenu } from './ContextMenu';
 import { GitBranch, Tag } from 'lucide-react';
 
 interface CommitGraphProps {
   commits: GitCommit[];
   onCommitClick: (commit: GitCommit) => void;
-  onReset: (commitId: string, mode: 'soft' | 'mixed' | 'hard') => void;
-  onCherryPick: (commitId: string) => void;
-  onRevert: (commitId: string) => void;
-  onCreateBranch: (fromCommit: string) => void;
 }
 
 interface ContextMenuState {
@@ -49,14 +43,7 @@ interface LaneConnectionState {
   passing: GraphConnection[];
 }
 
-interface ConnectionLine {
-  id: string;
-  path: string;
-  color: string;
-}
-
 const LANE_COLUMN_WIDTH = 72;
-const LINE_OFFSET = 6;
 
 const getBranchColor = (branchName: string): string => {
   const predefined: Record<string, string> = {
@@ -84,11 +71,7 @@ const getBranchColor = (branchName: string): string => {
 
 export const CommitGraph: React.FC<CommitGraphProps> = ({
   commits,
-  onCommitClick,
-  onReset,
-  onCherryPick,
-  onRevert,
-  onCreateBranch
+  onCommitClick
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
@@ -99,15 +82,14 @@ export const CommitGraph: React.FC<CommitGraphProps> = ({
     y: 0,
     commit: null
   });
-  const [connectionLines, setConnectionLines] = useState<ConnectionLine[]>([]);
-  const [graphDimensions, setGraphDimensions] = useState({ width: 0, height: 0 });
 
   const sortedCommits = useMemo(
     () => [...commits].sort((a, b) => b.date.getTime() - a.date.getTime()),
     [commits]
   );
 
-  const { branchLanes, commitLaneMap, laneStates, connections } = useMemo(() => {
+  // Calculate lanes and connections
+  const { branchLanes, commitLaneMap, connections } = useMemo(() => {
     const lanes: BranchLane[] = [];
     const laneIndexByName: Record<string, number> = {};
     const laneMap: Record<string, number> = {};
@@ -187,10 +169,51 @@ export const CommitGraph: React.FC<CommitGraphProps> = ({
     return {
       branchLanes: lanes,
       commitLaneMap: laneMap,
-      laneStates: connectionStates,
       connections
     };
   }, [sortedCommits]);
+
+  // Calculate node positions for SVG
+  const ROW_HEIGHT = 64;
+  const nodePositions = useMemo(() => {
+    const positions: Record<string, { x: number; y: number; lane: number; row: number }> = {};
+    sortedCommits.forEach((commit, rowIndex) => {
+      const laneIndex = commitLaneMap[commit.id];
+      positions[commit.id] = {
+        x: laneIndex * LANE_COLUMN_WIDTH + LANE_COLUMN_WIDTH / 2,
+        y: rowIndex * ROW_HEIGHT + ROW_HEIGHT / 2,
+        lane: laneIndex,
+        row: rowIndex
+      };
+    });
+    return positions;
+  }, [sortedCommits, commitLaneMap]);
+
+  // SVG connection lines
+  const svgConnections = useMemo(() => {
+    const lines: { id: string; path: string; color: string }[] = [];
+    connections.forEach((connection) => {
+      const fromPos = nodePositions[sortedCommits[connection.fromIndex].id];
+      const toPos = nodePositions[sortedCommits[connection.toIndex].id];
+      if (!fromPos || !toPos) return;
+      if (fromPos.lane === toPos.lane) {
+        // Vertical line
+        lines.push({
+          id: connection.id,
+          path: `M ${fromPos.x} ${fromPos.y} L ${toPos.x} ${toPos.y}`,
+          color: connection.color
+        });
+      } else {
+        // Merge: horizontal from parent to child lane, then vertical down
+        lines.push({
+          id: connection.id + '-h',
+          path: `M ${fromPos.x} ${fromPos.y} H ${toPos.x} V ${toPos.y}`,
+          color: connection.color
+        });
+      }
+    });
+    return lines;
+  }, [connections, nodePositions, sortedCommits]);
 
   const registerNodeRef = useCallback(
     (commitId: string) => (element: HTMLDivElement | null) => {
@@ -202,88 +225,6 @@ export const CommitGraph: React.FC<CommitGraphProps> = ({
     },
     []
   );
-
-  const recomputeConnections = useCallback(() => {
-    const container = timelineRef.current;
-
-    if (!container) {
-      return;
-    }
-
-    const width = container.scrollWidth;
-    const height = container.scrollHeight;
-    const lines: ConnectionLine[] = [];
-
-    connections.forEach((connection) => {
-      const fromCommit = sortedCommits[connection.fromIndex];
-      const toCommit = sortedCommits[connection.toIndex];
-
-      if (!fromCommit || !toCommit) {
-        return;
-      }
-
-      const fromElement = nodeRefs.current[fromCommit.id];
-      const toElement = nodeRefs.current[toCommit.id];
-
-      if (!fromElement || !toElement) {
-        return;
-      }
-
-      const x1 = fromElement.offsetLeft + fromElement.offsetWidth / 2;
-      const y1 = fromElement.offsetTop + fromElement.offsetHeight / 2;
-      const x2 = toElement.offsetLeft + toElement.offsetWidth / 2;
-      const y2 = toElement.offsetTop + toElement.offsetHeight / 2;
-
-      const sameLane = Math.abs(x1 - x2) < 1;
-      const path = sameLane
-        ? `M ${x1} ${y1} L ${x2} ${y2}`
-        : `M ${x1} ${y1} V ${y2} H ${x2}`;
-
-      lines.push({
-        id: connection.id,
-        path,
-        color: connection.color
-      });
-    });
-
-    setGraphDimensions({ width, height });
-    setConnectionLines(lines);
-  }, [connections, sortedCommits]);
-
-  useLayoutEffect(() => {
-    recomputeConnections();
-  }, [recomputeConnections]);
-
-  useEffect(() => {
-    const handleResize = () => {
-      recomputeConnections();
-    };
-
-    window.addEventListener('resize', handleResize);
-    return () => window.removeEventListener('resize', handleResize);
-  }, [recomputeConnections]);
-
-  useEffect(() => {
-    if (typeof ResizeObserver === 'undefined') {
-      return undefined;
-    }
-
-    const container = timelineRef.current;
-
-    if (!container) {
-      return undefined;
-    }
-
-    const observer = new ResizeObserver(() => {
-      recomputeConnections();
-    });
-
-    observer.observe(container);
-
-    return () => {
-      observer.disconnect();
-    };
-  }, [recomputeConnections]);
 
   const handleContextMenu = useCallback((e: React.MouseEvent, commit: GitCommit) => {
     e.preventDefault();
@@ -309,7 +250,6 @@ export const CommitGraph: React.FC<CommitGraphProps> = ({
         handleCloseContextMenu();
       }
     };
-
     document.addEventListener('click', handleGlobalClick);
     return () => document.removeEventListener('click', handleGlobalClick);
   }, [contextMenu.show, handleCloseContextMenu]);
@@ -325,123 +265,15 @@ export const CommitGraph: React.FC<CommitGraphProps> = ({
   const renderLaneCell = (
     commit: GitCommit,
     lane: BranchLane,
-    laneIndex: number,
-    rowIndex: number
+    laneIndex: number
   ) => {
     const commitLane = commitLaneMap[commit.id];
     const isCommitLane = laneIndex === commitLane;
-    const laneState = laneStates[rowIndex]?.[laneIndex];
-    const incoming = laneState?.incoming ?? [];
-    const outgoing = laneState?.outgoing ?? [];
-    const passing = laneState?.passing ?? [];
-
-    const verticalSegments = [
-      ...passing.map((connection) => ({
-        color: connection.color,
-        top: 0,
-        height: '100%'
-      })),
-      ...outgoing.map((connection) => ({
-        color: connection.color,
-        top: '50%',
-        height: '50%'
-      }))
-    ];
-
-    // Render horizontal incoming connections from other lanes
-    const horizontalIncoming = incoming.filter(
-      (connection) => connection.fromLane !== laneIndex
-    );
-    // Render vertical incoming connections from same lane
-    const verticalIncoming = incoming.filter(
-      (connection) => connection.fromLane === laneIndex
-    );
-
-    const getOffset = (index: number, total: number) =>
-      (index - (total - 1) / 2) * LINE_OFFSET;
 
     return (
-      <div key={lane.name} className="relative flex items-center justify-center py-6">
-        {/* Vertical segments for passing/outgoing */}
-        {verticalSegments.map((segment, index) => {
-          const offset = getOffset(index, verticalSegments.length);
-          return (
-            <div
-              key={`segment-${index}`}
-              className="absolute w-1 rounded-full"
-              style={{
-                left: `calc(50% + ${offset}px)`,
-                top: segment.top,
-                height: segment.height,
-                backgroundColor: segment.color,
-                opacity: 0.35
-              }}
-            />
-          );
-        })}
-
-        {/* Vertical incoming connections from same lane */}
-        {verticalIncoming.map((connection, index) => {
-          const offset = getOffset(index, verticalIncoming.length);
-          return (
-            <div
-              key={`vertical-incoming-${index}`}
-              className="absolute w-1 rounded-full"
-              style={{
-                left: `calc(50% + ${offset}px)`,
-                top: 0,
-                height: '50%',
-                backgroundColor: connection.color,
-                opacity: 0.35
-              }}
-            />
-          );
-        })}
-
-        {/* Horizontal incoming connections from other lanes */}
-        {horizontalIncoming.map((connection, index) => {
-          // Determine direction: left or right
-          const direction = connection.fromLane < laneIndex ? 'left' : 'right';
-          const laneDiff = Math.abs(connection.fromLane - laneIndex);
-          const horizontalOffset = laneDiff * LANE_COLUMN_WIDTH;
-          const color = connection.color;
-          // Offset for stacking multiple horizontal lines
-          const stackOffset = getOffset(index, horizontalIncoming.length);
-          return (
-            <>
-              {/* Horizontal segment from source lane to current lane */}
-              <div
-                key={`horizontal-incoming-h-${index}`}
-                className="absolute h-1 rounded-full"
-                style={{
-                  top: `0`,
-                  left:
-                    direction === 'left'
-                      ? `calc(50% - ${horizontalOffset}px + ${stackOffset}px)`
-                      : `calc(50% + ${stackOffset}px)`,
-                  width: `${horizontalOffset}px`,
-                  backgroundColor: color,
-                  opacity: 0.35
-                }}
-              />
-              {/* Vertical segment down to node */}
-              <div
-                key={`horizontal-incoming-v-${index}`}
-                className="absolute w-1 rounded-full"
-                style={{
-                  left: `calc(50% + ${stackOffset}px)`,
-                  top: 0,
-                  height: '50%',
-                  backgroundColor: color,
-                  opacity: 0.35
-                }}
-              />
-            </>
-          );
-        })}
-
+      <div key={lane.name} className="relative flex items-center justify-center" style={{ height: ROW_HEIGHT }}>
         {isCommitLane && (
-          <div ref={registerNodeRef(commit.id)} className="relative z-20">
+          <div ref={registerNodeRef(commit.id)} className="relative z-20 flex items-center justify-center" style={{ height: ROW_HEIGHT }}>
             <CommitNode
               commit={commit}
               branchColor={lane.color}
@@ -450,75 +282,6 @@ export const CommitGraph: React.FC<CommitGraphProps> = ({
             />
           </div>
         )}
-      </div>
-    );
-  };
-
-  const renderCommitRow = (commit: GitCommit, index: number) => {
-    return (
-      <div
-        key={commit.id}
-        className="grid border-b border-gray-800 bg-gray-900/60 hover:bg-gray-900 transition-colors"
-        style={{ gridTemplateColumns: `${timelineColumns} minmax(0, 1fr)` }}
-      >
-        {branchLanes.length > 0 ? (
-          branchLanes.map((lane, laneIndex) =>
-            renderLaneCell(commit, lane, laneIndex, index)
-          )
-        ) : (
-          <div className="py-6" />
-        )}
-
-        <div className="flex flex-col gap-2 py-4 pr-6">
-          <div className="flex flex-wrap items-center gap-3">
-            <button
-              type="button"
-              onClick={() => onCommitClick(commit)}
-              onContextMenu={(event) => handleContextMenu(event, commit)}
-              className="text-left text-sm font-semibold text-gray-100 hover:text-white"
-            >
-              {commit.message}
-            </button>
-
-            <div className="flex flex-wrap items-center gap-2">
-              {commit.branches.map((branch) => (
-                <span
-                  key={`${commit.id}-${branch}`}
-                  className="px-2 py-0.5 text-xs font-medium rounded-full border"
-                  style={{
-                    borderColor: getBranchColor(branch),
-                    color: getBranchColor(branch)
-                  }}
-                  >
-                    {branch}
-                  </span>
-              ))}
-
-              {commit.tags.map((tag) => (
-                <span
-                  key={`${commit.id}-${tag}`}
-                  className="inline-flex items-center gap-1 rounded-full bg-yellow-600/20 px-2 py-0.5 text-xs font-medium text-yellow-200"
-                >
-                  <Tag className="h-3 w-3" />
-                  {tag}
-                </span>
-              ))}
-            </div>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-gray-400">
-            <span className="font-mono text-gray-300">{commit.shortHash}</span>
-            <span>{commit.author.name}</span>
-            <span>
-              {commit.date.toLocaleDateString()} {commit.date.toLocaleTimeString()}
-            </span>
-            <span className="text-green-400">
-              +{commit.stats.additions}
-            </span>
-            <span className="text-red-400">-{commit.stats.deletions}</span>
-            <span>{commit.files.length} file{commit.files.length === 1 ? '' : 's'}</span>
-          </div>
-        </div>
       </div>
     );
   };
@@ -533,7 +296,6 @@ export const CommitGraph: React.FC<CommitGraphProps> = ({
               Branches
             </h3>
           </div>
-
           <div className="space-y-3 px-4 py-4">
             {branchLanes.map((lane) => (
               <div key={lane.name} className="flex items-center gap-3">
@@ -546,56 +308,102 @@ export const CommitGraph: React.FC<CommitGraphProps> = ({
                 </span>
               </div>
             ))}
-
             {branchLanes.length === 0 && (
               <div className="text-sm text-gray-500">No branches detected</div>
             )}
           </div>
         </div>
-
         <div className="flex-1 overflow-auto">
           <div
             ref={timelineRef}
             className="relative min-w-full divide-y divide-gray-800"
+            style={{ height: sortedCommits.length * ROW_HEIGHT }}
           >
-            {graphDimensions.width > 0 && graphDimensions.height > 0 && (
-              <svg
-                className="pointer-events-none absolute inset-0 z-10"
-                width={graphDimensions.width}
-                height={graphDimensions.height}
-                viewBox={`0 0 ${graphDimensions.width} ${graphDimensions.height}`}
+            {/* SVG overlay for all connections */}
+            <svg
+              className="pointer-events-none absolute inset-0 z-10"
+              width={branchLanes.length * LANE_COLUMN_WIDTH}
+              height={sortedCommits.length * ROW_HEIGHT}
+              viewBox={`0 0 ${branchLanes.length * LANE_COLUMN_WIDTH} ${sortedCommits.length * ROW_HEIGHT}`}
+            >
+              {svgConnections.map((line) => (
+                <path
+                  key={line.id}
+                  d={line.path}
+                  stroke={line.color}
+                  strokeWidth={4}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  fill="none"
+                  opacity={0.7}
+                />
+              ))}
+            </svg>
+            {sortedCommits.map((commit) => (
+              <div
+                key={commit.id}
+                className="grid border-b border-gray-800 bg-gray-900/60 hover:bg-gray-900 transition-colors"
+                style={{ gridTemplateColumns: `${timelineColumns} minmax(0, 1fr)`, height: ROW_HEIGHT }}
               >
-                {connectionLines.map((line) => (
-                  <path
-                    key={line.id}
-                    d={line.path}
-                    stroke={line.color}
-                    strokeWidth={4}
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    fill="none"
-                    opacity={0.45}
-                  />
-                ))}
-              </svg>
-            )}
-            {sortedCommits.map((commit, index) => renderCommitRow(commit, index))}
+                {branchLanes.length > 0 ? (
+                  branchLanes.map((lane, laneIndex) =>
+                    renderLaneCell(commit, lane, laneIndex)
+                  )
+                ) : (
+                  <div style={{ height: ROW_HEIGHT }} />
+                )}
+                <div className="flex flex-col gap-2 py-4 pr-6">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={() => onCommitClick(commit)}
+                      onContextMenu={(event) => handleContextMenu(event, commit)}
+                      className="text-left text-sm font-semibold text-gray-100 hover:text-white"
+                    >
+                      {commit.message}
+                    </button>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {commit.branches.map((branch) => (
+                        <span
+                          key={`${commit.id}-${branch}`}
+                          className="px-2 py-0.5 text-xs font-medium rounded-full border"
+                          style={{
+                            borderColor: getBranchColor(branch),
+                            color: getBranchColor(branch)
+                          }}
+                        >
+                          {branch}
+                        </span>
+                      ))}
+                      {commit.tags.map((tag) => (
+                        <span
+                          key={`${commit.id}-${tag}`}
+                          className="inline-flex items-center gap-1 rounded-full bg-yellow-600/20 px-2 py-0.5 text-xs font-medium text-yellow-200"
+                        >
+                          <Tag className="h-3 w-3" />
+                          {tag}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-gray-400">
+                    <span className="font-mono text-gray-300">{commit.shortHash}</span>
+                    <span>{commit.author.name}</span>
+                    <span>
+                      {commit.date.toLocaleDateString()} {commit.date.toLocaleTimeString()}
+                    </span>
+                    <span className="text-green-400">
+                      +{commit.stats.additions}
+                    </span>
+                    <span className="text-red-400">-{commit.stats.deletions}</span>
+                    <span>{commit.files.length} file{commit.files.length === 1 ? '' : 's'}</span>
+                  </div>
+                </div>
+              </div>
+            ))}
           </div>
         </div>
       </div>
-
-      {contextMenu.show && contextMenu.commit && (
-        <ContextMenu
-          x={contextMenu.x}
-          y={contextMenu.y}
-          commit={contextMenu.commit}
-          onReset={onReset}
-          onCherryPick={onCherryPick}
-          onRevert={onRevert}
-          onCreateBranch={onCreateBranch}
-          onClose={handleCloseContextMenu}
-        />
-      )}
     </div>
   );
 };
