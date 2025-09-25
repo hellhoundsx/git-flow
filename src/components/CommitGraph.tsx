@@ -1,4 +1,11 @@
-import React, { useMemo, useState, useCallback, useRef, useEffect } from 'react';
+import React, {
+  useMemo,
+  useState,
+  useCallback,
+  useRef,
+  useEffect,
+  useLayoutEffect
+} from 'react';
 import { GitCommit } from '../types/git';
 import { CommitNode } from './CommitNode';
 import { ContextMenu } from './ContextMenu';
@@ -27,7 +34,32 @@ interface BranchLane {
   lastCommitIndex: number;
 }
 
+interface GraphConnection {
+  id: string;
+  fromIndex: number;
+  toIndex: number;
+  fromLane: number;
+  toLane: number;
+  color: string;
+}
+
+interface LaneConnectionState {
+  incoming: GraphConnection[];
+  outgoing: GraphConnection[];
+  passing: GraphConnection[];
+}
+
+interface ConnectionLine {
+  id: string;
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+  color: string;
+}
+
 const LANE_COLUMN_WIDTH = 72;
+const LINE_OFFSET = 6;
 
 const getBranchColor = (branchName: string): string => {
   const predefined: Record<string, string> = {
@@ -62,25 +94,31 @@ export const CommitGraph: React.FC<CommitGraphProps> = ({
   onCreateBranch
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
+  const timelineRef = useRef<HTMLDivElement>(null);
+  const nodeRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const [contextMenu, setContextMenu] = useState<ContextMenuState>({
     show: false,
     x: 0,
     y: 0,
     commit: null
   });
+  const [connectionLines, setConnectionLines] = useState<ConnectionLine[]>([]);
+  const [graphDimensions, setGraphDimensions] = useState({ width: 0, height: 0 });
 
   const sortedCommits = useMemo(
     () => [...commits].sort((a, b) => b.date.getTime() - a.date.getTime()),
     [commits]
   );
 
-  const { branchLanes, commitLaneMap } = useMemo(() => {
+  const { branchLanes, commitLaneMap, laneStates, connections } = useMemo(() => {
     const lanes: BranchLane[] = [];
     const laneIndexByName: Record<string, number> = {};
     const laneMap: Record<string, number> = {};
+    const commitIndexMap: Record<string, number> = {};
 
     sortedCommits.forEach((commit, index) => {
       const primaryBranch = commit.branches[0] || 'detached';
+      commitIndexMap[commit.id] = index;
 
       if (laneIndexByName[primaryBranch] === undefined) {
         laneIndexByName[primaryBranch] = lanes.length;
@@ -98,8 +136,155 @@ export const CommitGraph: React.FC<CommitGraphProps> = ({
       laneMap[commit.id] = laneIndexByName[primaryBranch];
     });
 
-    return { branchLanes: lanes, commitLaneMap: laneMap };
+    const connectionStates: LaneConnectionState[][] = sortedCommits.map(() =>
+      lanes.map(() => ({ incoming: [], outgoing: [], passing: [] }))
+    );
+
+    const connections: GraphConnection[] = [];
+
+    sortedCommits.forEach((commit, fromIndex) => {
+      const fromLane = laneMap[commit.id];
+
+      if (fromLane === undefined) {
+        return;
+      }
+
+      commit.parents.forEach((parentId) => {
+        const toIndex = commitIndexMap[parentId];
+
+        if (toIndex === undefined) {
+          return;
+        }
+
+        const toLane = laneMap[parentId] ?? fromLane;
+        const color = lanes[fromLane]?.color ?? '#6B7280';
+        const connection: GraphConnection = {
+          id: `${commit.id}-${parentId}`,
+          fromIndex,
+          toIndex,
+          fromLane,
+          toLane,
+          color
+        };
+
+        connections.push(connection);
+      });
+    });
+
+    connections.forEach((connection) => {
+      const { fromIndex, toIndex, fromLane, toLane } = connection;
+
+      const fromLaneState = connectionStates[fromIndex]?.[fromLane];
+      const toLaneState = connectionStates[toIndex]?.[toLane];
+
+      fromLaneState?.outgoing.push(connection);
+
+      for (let row = fromIndex + 1; row < toIndex; row += 1) {
+        const passingLaneState = connectionStates[row]?.[fromLane];
+        passingLaneState?.passing.push(connection);
+      }
+
+      toLaneState?.incoming.push(connection);
+    });
+
+    return {
+      branchLanes: lanes,
+      commitLaneMap: laneMap,
+      laneStates: connectionStates,
+      connections
+    };
   }, [sortedCommits]);
+
+  const registerNodeRef = useCallback(
+    (commitId: string) => (element: HTMLDivElement | null) => {
+      if (element) {
+        nodeRefs.current[commitId] = element;
+      } else {
+        delete nodeRefs.current[commitId];
+      }
+    },
+    []
+  );
+
+  const recomputeConnections = useCallback(() => {
+    const container = timelineRef.current;
+
+    if (!container) {
+      return;
+    }
+
+    const width = container.scrollWidth;
+    const height = container.scrollHeight;
+    const lines: ConnectionLine[] = [];
+
+    connections.forEach((connection) => {
+      const fromCommit = sortedCommits[connection.fromIndex];
+      const toCommit = sortedCommits[connection.toIndex];
+
+      if (!fromCommit || !toCommit) {
+        return;
+      }
+
+      const fromElement = nodeRefs.current[fromCommit.id];
+      const toElement = nodeRefs.current[toCommit.id];
+
+      if (!fromElement || !toElement) {
+        return;
+      }
+
+      const x1 = fromElement.offsetLeft + fromElement.offsetWidth / 2;
+      const y1 = fromElement.offsetTop + fromElement.offsetHeight / 2;
+      const x2 = toElement.offsetLeft + toElement.offsetWidth / 2;
+      const y2 = toElement.offsetTop + toElement.offsetHeight / 2;
+
+      lines.push({
+        id: connection.id,
+        x1,
+        y1,
+        x2,
+        y2,
+        color: connection.color
+      });
+    });
+
+    setGraphDimensions({ width, height });
+    setConnectionLines(lines);
+  }, [connections, sortedCommits]);
+
+  useLayoutEffect(() => {
+    recomputeConnections();
+  }, [recomputeConnections]);
+
+  useEffect(() => {
+    const handleResize = () => {
+      recomputeConnections();
+    };
+
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, [recomputeConnections]);
+
+  useEffect(() => {
+    if (typeof ResizeObserver === 'undefined') {
+      return undefined;
+    }
+
+    const container = timelineRef.current;
+
+    if (!container) {
+      return undefined;
+    }
+
+    const observer = new ResizeObserver(() => {
+      recomputeConnections();
+    });
+
+    observer.observe(container);
+
+    return () => {
+      observer.disconnect();
+    };
+  }, [recomputeConnections]);
 
   const handleContextMenu = useCallback((e: React.MouseEvent, commit: GitCommit) => {
     e.preventDefault();
@@ -146,63 +331,61 @@ export const CommitGraph: React.FC<CommitGraphProps> = ({
   ) => {
     const commitLane = commitLaneMap[commit.id];
     const isCommitLane = laneIndex === commitLane;
-    const parentLanes = commit.parents
-      .map((parentId) => commitLaneMap[parentId])
-      .filter((value): value is number => value !== undefined);
+    const laneState = laneStates[rowIndex]?.[laneIndex];
+    const incoming = laneState?.incoming ?? [];
+    const outgoing = laneState?.outgoing ?? [];
+    const passing = laneState?.passing ?? [];
 
-    const isParentLane = parentLanes.includes(laneIndex) && !isCommitLane;
-    const showTopConnector = isCommitLane && rowIndex > lane.firstCommitIndex;
-    const showBottomConnector = isCommitLane && rowIndex < lane.lastCommitIndex;
-    const showPassingLine =
-      !isCommitLane &&
-      rowIndex > lane.firstCommitIndex &&
-      rowIndex < lane.lastCommitIndex;
+    const verticalSegments = [
+      ...passing.map((connection) => ({
+        color: connection.color,
+        top: 0,
+        height: '100%'
+      })),
+      ...incoming.map((connection) => ({
+        color: connection.color,
+        top: 0,
+        height: '50%'
+      })),
+      ...outgoing.map((connection) => ({
+        color: connection.color,
+        top: '50%',
+        height: '50%'
+      }))
+    ];
+
+    const getOffset = (index: number, total: number) =>
+      (index - (total - 1) / 2) * LINE_OFFSET;
 
     return (
       <div key={lane.name} className="relative flex items-center justify-center py-6">
-        {showPassingLine && (
-          <div
-            className="absolute top-0 bottom-0 w-0.5 opacity-40"
-            style={{ backgroundColor: lane.color }}
-          />
-        )}
+        {verticalSegments.map((segment, index) => {
+          const offset = getOffset(index, verticalSegments.length);
 
-        {showTopConnector && (
-          <div
-            className="absolute top-0 left-1/2 w-0.5 opacity-60"
-            style={{
-              backgroundColor: lane.color,
-              transform: 'translateX(-50%)',
-              height: '50%'
-            }}
-          />
-        )}
-
-        {showBottomConnector && (
-          <div
-            className="absolute bottom-0 left-1/2 w-0.5 opacity-60"
-            style={{
-              backgroundColor: lane.color,
-              transform: 'translateX(-50%)',
-              height: '50%'
-            }}
-          />
-        )}
-
-        {isParentLane && (
-          <div
-            className="w-3 h-3 rounded-full border-2"
-            style={{ borderColor: lane.color }}
-          />
-        )}
+          return (
+            <div
+              key={`segment-${index}`}
+              className="absolute w-1 rounded-full"
+              style={{
+                left: `calc(50% + ${offset}px)`,
+                top: segment.top,
+                height: segment.height,
+                backgroundColor: segment.color,
+                opacity: 0.35
+              }}
+            />
+          );
+        })}
 
         {isCommitLane && (
-          <CommitNode
-            commit={commit}
-            branchColor={lane.color}
-            onClick={() => onCommitClick(commit)}
-            onContextMenu={(event) => handleContextMenu(event, commit)}
-          />
+          <div ref={registerNodeRef(commit.id)} className="relative z-20">
+            <CommitNode
+              commit={commit}
+              branchColor={lane.color}
+              onClick={() => onCommitClick(commit)}
+              onContextMenu={(event) => handleContextMenu(event, commit)}
+            />
+          </div>
         )}
       </div>
     );
@@ -308,7 +491,32 @@ export const CommitGraph: React.FC<CommitGraphProps> = ({
         </div>
 
         <div className="flex-1 overflow-auto">
-          <div className="min-w-full divide-y divide-gray-800">
+          <div
+            ref={timelineRef}
+            className="relative min-w-full divide-y divide-gray-800"
+          >
+            {graphDimensions.width > 0 && graphDimensions.height > 0 && (
+              <svg
+                className="pointer-events-none absolute inset-0 z-10"
+                width={graphDimensions.width}
+                height={graphDimensions.height}
+                viewBox={`0 0 ${graphDimensions.width} ${graphDimensions.height}`}
+              >
+                {connectionLines.map((line) => (
+                  <line
+                    key={line.id}
+                    x1={line.x1}
+                    y1={line.y1}
+                    x2={line.x2}
+                    y2={line.y2}
+                    stroke={line.color}
+                    strokeWidth={4}
+                    strokeLinecap="round"
+                    opacity={0.45}
+                  />
+                ))}
+              </svg>
+            )}
             {sortedCommits.map((commit, index) => renderCommitRow(commit, index))}
           </div>
         </div>
