@@ -140,6 +140,7 @@ function App() {
         
         <CommitGraph
           commits={commits}
+          branches={branches}
           onCommitClick={setSelectedCommit}
           onReset={handleReset}
           onCherryPick={handleCherryPick}
