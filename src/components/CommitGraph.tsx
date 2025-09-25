@@ -192,28 +192,59 @@ export const CommitGraph: React.FC<CommitGraphProps> = ({
   // SVG connection lines
   const svgConnections = useMemo(() => {
     const lines: { id: string; path: string; color: string }[] = [];
+    // Draw vertical lines for each lane (continuous)
+    branchLanes.forEach((lane, laneIndex) => {
+      let prevY: number | null = null;
+      sortedCommits.forEach((commit, rowIndex) => {
+        if (commitLaneMap[commit.id] === laneIndex) {
+          const pos = nodePositions[commit.id];
+          if (prevY !== null) {
+            lines.push({
+              id: `lane-${lane.name}-v-${rowIndex}`,
+              path: `M ${pos.x} ${prevY} L ${pos.x} ${pos.y}`,
+              color: lane.color
+            });
+          }
+          prevY = pos.y;
+        }
+      });
+    });
+    // Draw connections (forks and merges)
     connections.forEach((connection) => {
       const fromPos = nodePositions[sortedCommits[connection.fromIndex].id];
       const toPos = nodePositions[sortedCommits[connection.toIndex].id];
       if (!fromPos || !toPos) return;
-      if (fromPos.lane === toPos.lane) {
-        // Vertical line
+      const isBranchStart = branchLanes[toPos.lane]?.firstCommitIndex === connection.toIndex && fromPos.lane !== toPos.lane;
+      if (isBranchStart) {
+        // Branch start: fork at parent node's Y position
         lines.push({
-          id: connection.id,
-          path: `M ${fromPos.x} ${fromPos.y} L ${toPos.x} ${toPos.y}`,
+          id: connection.id + '-branch-h',
+          path: `M ${fromPos.x} ${fromPos.y} H ${toPos.x}`,
           color: connection.color
         });
-      } else {
-        // Merge: horizontal from parent to child lane, then vertical down
         lines.push({
-          id: connection.id + '-h',
-          path: `M ${fromPos.x} ${fromPos.y} H ${toPos.x} V ${toPos.y}`,
+          id: connection.id + '-branch-v',
+          path: `M ${toPos.x} ${fromPos.y} V ${toPos.y}`,
+          color: connection.color
+        });
+      } else if (fromPos.lane === toPos.lane) {
+        // Already handled by vertical lane lines above
+      } else {
+        // Merge: horizontal at child Y, then vertical up to parent
+        lines.push({
+          id: connection.id + '-merge-h',
+          path: `M ${fromPos.x} ${toPos.y} H ${toPos.x}`,
+          color: connection.color
+        });
+        lines.push({
+          id: connection.id + '-merge-v',
+          path: `M ${fromPos.x} ${fromPos.y} V ${toPos.y}`,
           color: connection.color
         });
       }
     });
     return lines;
-  }, [connections, nodePositions, sortedCommits]);
+  }, [connections, nodePositions, sortedCommits, branchLanes, commitLaneMap]);
 
   const registerNodeRef = useCallback(
     (commitId: string) => (element: HTMLDivElement | null) => {
