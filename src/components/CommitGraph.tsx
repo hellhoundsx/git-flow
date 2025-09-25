@@ -257,8 +257,11 @@ export const CommitGraph: React.FC<CommitGraphProps> = ({
     const lines: { id: string; path: string; color: string }[] = [];
 
     const getAnchors = (pos: { x: number; y: number }) => ({
-      top: pos.y - COMMIT_NODE_RADIUS,
-      bottom: pos.y + COMMIT_NODE_RADIUS
+      top: { x: pos.x, y: pos.y - COMMIT_NODE_RADIUS },
+      bottom: { x: pos.x, y: pos.y + COMMIT_NODE_RADIUS },
+      left: { x: pos.x - COMMIT_NODE_RADIUS, y: pos.y },
+      right: { x: pos.x + COMMIT_NODE_RADIUS, y: pos.y },
+      center: { x: pos.x, y: pos.y }
     });
 
     const laneStates: Record<number, { nextBottom: number; branch: string }> = {};
@@ -276,13 +279,13 @@ export const CommitGraph: React.FC<CommitGraphProps> = ({
       if (laneState && laneState.branch === laneInfo.branch) {
         lines.push({
           id: `lane-${laneInfo.lane}-${commit.id}`,
-          path: `M ${pos.x} ${anchors.top} V ${laneState.nextBottom}`,
+          path: `M ${anchors.top.x} ${anchors.top.y} V ${laneState.nextBottom}`,
           color: getBranchColor(laneInfo.branch)
         });
       }
 
       laneStates[laneInfo.lane] = {
-        nextBottom: anchors.bottom,
+        nextBottom: anchors.bottom.y,
         branch: laneInfo.branch
       };
     });
@@ -301,16 +304,31 @@ export const CommitGraph: React.FC<CommitGraphProps> = ({
       const childAnchors = getAnchors(childPos);
       const parentAnchors = getAnchors(parentPos);
 
-      const startX = parentPos.x;
-      const startY = parentAnchors.top;
-      const endX = childPos.x;
-      const endY = childAnchors.bottom;
+      const isChildBelowParent = childPos.y > parentPos.y;
 
-      const midY = (startY + endY) / 2;
+      if (connection.type === 'merge') {
+        const startAnchor = isChildBelowParent ? parentAnchors.bottom : parentAnchors.top;
+        const startX = startAnchor.x;
+        const startY = startAnchor.y;
+        const mergeY = childAnchors.right.y;
+        const mergeX = childAnchors.right.x;
+
+        lines.push({
+          id: `${connection.id}-${connection.type}`,
+          path: `M ${startX} ${startY} V ${mergeY} H ${mergeX}`,
+          color: connection.color
+        });
+        return;
+      }
+
+      const startX = parentAnchors.right.x;
+      const startY = parentAnchors.right.y;
+      const endX = childPos.x;
+      const endY = childAnchors.bottom.y;
 
       lines.push({
         id: `${connection.id}-${connection.type}`,
-        path: `M ${startX} ${startY} V ${midY} H ${endX} V ${endY}`,
+        path: `M ${startX} ${startY} H ${endX} V ${endY}`,
         color: connection.color
       });
     });
