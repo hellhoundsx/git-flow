@@ -237,6 +237,7 @@ export const CommitGraph: React.FC<CommitGraphProps> = ({
 
   // Calculate node positions for SVG
   const ROW_HEIGHT = 64;
+  const COMMIT_NODE_RADIUS = 24;
   const nodePositions = useMemo(() => {
     const positions: Record<string, { x: number; y: number; lane: number; row: number }> = {};
     sortedCommits.forEach((commit, rowIndex) => {
@@ -252,98 +253,68 @@ export const CommitGraph: React.FC<CommitGraphProps> = ({
   }, [sortedCommits, commitLaneInfo]);
 
   // SVG connection lines
-  const CORNER_RADIUS = 10;
   const svgConnections = useMemo(() => {
     const lines: { id: string; path: string; color: string }[] = [];
-    // Draw vertical lines for each lane (continuous)
-    const laneStates: Record<number, { lastY: number | null; branch: string | null }> = {};
-    sortedCommits.forEach((commit, rowIndex) => {
+
+    const getAnchors = (pos: { x: number; y: number }) => ({
+      top: pos.y - COMMIT_NODE_RADIUS,
+      bottom: pos.y + COMMIT_NODE_RADIUS
+    });
+
+    const laneStates: Record<number, { nextBottom: number; branch: string }> = {};
+
+    sortedCommits.forEach((commit) => {
       const laneInfo = commitLaneInfo[commit.id];
       if (!laneInfo) {
         return;
       }
+
       const pos = nodePositions[commit.id];
-      const laneIndex = laneInfo.lane;
-      if (!laneStates[laneIndex]) {
-        laneStates[laneIndex] = { lastY: null, branch: null };
-      }
-      const laneState = laneStates[laneIndex];
-      if (laneState.lastY !== null && laneState.branch === laneInfo.branch) {
+      const anchors = getAnchors(pos);
+      const laneState = laneStates[laneInfo.lane];
+
+      if (laneState && laneState.branch === laneInfo.branch) {
         lines.push({
-          id: `lane-${laneIndex}-v-${rowIndex}`,
-          path: `M ${pos.x} ${laneState.lastY} L ${pos.x} ${pos.y}`,
+          id: `lane-${laneInfo.lane}-${commit.id}`,
+          path: `M ${pos.x} ${anchors.top} V ${laneState.nextBottom}`,
           color: getBranchColor(laneInfo.branch)
         });
       }
-      laneStates[laneIndex] = { lastY: pos.y, branch: laneInfo.branch };
-    });
-    // Draw connections (forks and merges) with 90-degree turns and rounded corners (outside)
-    connections.forEach((connection) => {
-      const fromPos = nodePositions[sortedCommits[connection.fromIndex].id];
-      const toPos = nodePositions[sortedCommits[connection.toIndex].id];
-      if (!fromPos || !toPos) return;
-      if (connection.type === 'branch') {
-        // Branch start: fork at parent node's Y position, 90-degree turn with rounded corner (outside)
-        const horizontalDir = Math.sign(toPos.x - fromPos.x);
-        const verticalDir = Math.sign(toPos.y - fromPos.y);
-        const cornerX = toPos.x;
-        const cornerY = fromPos.y;
-        // Move horizontally, stop CORNER_RADIUS before the turn
-        const hStopX = cornerX - horizontalDir * CORNER_RADIUS;
-        // Move vertically, start CORNER_RADIUS after the turn
-        const vStartY = cornerY + verticalDir * CORNER_RADIUS;
-        // Sweep flag: 1 if both directions are the same (right-down, left-up), else 0
-        const arcSweep = (horizontalDir === 1 && verticalDir === 1) || (horizontalDir === -1 && verticalDir === -1) ? 1 : 0;
-        lines.push({
-          id: connection.id + '-branch-h',
-          path: `M ${fromPos.x} ${fromPos.y} H ${hStopX}`,
-          color: connection.color
-        });
 
-        // Arc for the outside corner
-        lines.push({
-          id: connection.id + '-branch-arc',
-          path: `M ${hStopX} ${cornerY} A ${CORNER_RADIUS} ${CORNER_RADIUS} 0 0 ${arcSweep} ${cornerX} ${vStartY}`,
-          color: connection.color
-        });
-        // Vertical segment
-        lines.push({
-          id: connection.id + '-branch-v',
-          path: `M ${cornerX} ${vStartY} V ${toPos.y}`,
-          color: connection.color
-        });
-      } else {
-        // Merge: 90-degree turn at child Y with rounded corner (outside)
-        const horizontalDir = Math.sign(toPos.x - fromPos.x);
-        const verticalDir = Math.sign(toPos.y - fromPos.y);
-        const cornerX = toPos.x;
-        const cornerY = toPos.y;
-        // Move vertically, stop CORNER_RADIUS before the turn
-        const vStopY = cornerY - verticalDir * CORNER_RADIUS;
-        // Move horizontally, start CORNER_RADIUS after the turn
-        const hStartX = fromPos.x + horizontalDir * CORNER_RADIUS;
-        // Sweep flag: 1 for right-down, left-up; 0 for right-up, left-down
-        // For outside arc, sweep = (horizontalDir !== verticalDir ? 1 : 0)
-        const arcSweep = horizontalDir !== verticalDir ? 1 : 0;
-        lines.push({
-          id: connection.id + '-merge-v',
-          path: `M ${fromPos.x} ${fromPos.y} V ${vStopY}`,
-          color: connection.color
-        });
-        // Arc for the outside corner
-        lines.push({
-          id: connection.id + '-merge-arc',
-          path: `M ${fromPos.x} ${vStopY} A ${CORNER_RADIUS} ${CORNER_RADIUS} 0 0 ${arcSweep} ${hStartX} ${cornerY}`,
-          color: connection.color
-        });
-        // Horizontal segment
-        lines.push({
-          id: connection.id + '-merge-h',
-          path: `M ${hStartX} ${cornerY} H ${cornerX}`,
-          color: connection.color
-        });
-      }
+      laneStates[laneInfo.lane] = {
+        nextBottom: anchors.bottom,
+        branch: laneInfo.branch
+      };
     });
+
+    connections.forEach((connection) => {
+      const childCommit = sortedCommits[connection.fromIndex];
+      const parentCommit = sortedCommits[connection.toIndex];
+
+      const childPos = nodePositions[childCommit.id];
+      const parentPos = nodePositions[parentCommit.id];
+
+      if (!childPos || !parentPos) {
+        return;
+      }
+
+      const childAnchors = getAnchors(childPos);
+      const parentAnchors = getAnchors(parentPos);
+
+      const startX = parentPos.x;
+      const startY = parentAnchors.top;
+      const endX = childPos.x;
+      const endY = childAnchors.bottom;
+
+      const midY = (startY + endY) / 2;
+
+      lines.push({
+        id: `${connection.id}-${connection.type}`,
+        path: `M ${startX} ${startY} V ${midY} H ${endX} V ${endY}`,
+        color: connection.color
+      });
+    });
+
     return lines;
   }, [connections, nodePositions, sortedCommits, commitLaneInfo]);
 
