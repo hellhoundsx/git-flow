@@ -1,16 +1,17 @@
-import React, { useState, useCallback, useRef, useEffect } from 'react';
-import { GitCommit, CommitGraphNode } from '../types/git';
+import React, {
+  useMemo,
+  useState,
+  useCallback,
+  useRef,
+  useEffect
+} from 'react';
+import { GitCommit } from '../types/git';
 import { CommitNode } from './CommitNode';
-import { ContextMenu } from './ContextMenu';
-import { Tag, GitBranch } from 'lucide-react';
+import { GitBranch, Tag } from 'lucide-react';
 
 interface CommitGraphProps {
   commits: GitCommit[];
   onCommitClick: (commit: GitCommit) => void;
-  onReset: (commitId: string, mode: 'soft' | 'mixed' | 'hard') => void;
-  onCherryPick: (commitId: string) => void;
-  onRevert: (commitId: string) => void;
-  onCreateBranch: (fromCommit: string) => void;
 }
 
 interface ContextMenuState {
@@ -20,107 +21,371 @@ interface ContextMenuState {
   commit: GitCommit | null;
 }
 
-interface BranchLane {
+interface GraphConnection {
+  id: string;
+  fromIndex: number;
+  toIndex: number;
+  fromLane: number;
+  toLane: number;
+  color: string;
+  type: 'branch' | 'merge';
+}
+
+interface CommitLaneInfo {
+  lane: number;
+  branch: string;
+}
+
+interface BranchLegendEntry {
   name: string;
   color: string;
-  active: boolean;
-  lastCommitIndex: number;
 }
+
+const LANE_COLUMN_WIDTH = 72;
+
+const getBranchColor = (branchName: string): string => {
+  const predefined: Record<string, string> = {
+    main: '#3B82F6',
+    master: '#3B82F6',
+    develop: '#10B981',
+    feature: '#8B5CF6',
+    hotfix: '#EF4444',
+    release: '#F59E0B'
+  };
+
+  for (const key of Object.keys(predefined)) {
+    if (branchName.includes(key)) {
+      return predefined[key];
+    }
+  }
+
+  let hash = 0;
+  for (let i = 0; i < branchName.length; i += 1) {
+    hash = branchName.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  const hue = Math.abs(hash) % 360;
+  return `hsl(${hue}, 70%, 60%)`;
+};
 
 export const CommitGraph: React.FC<CommitGraphProps> = ({
   commits,
-  onCommitClick,
-  onReset,
-  onCherryPick,
-  onRevert,
-  onCreateBranch
+  onCommitClick
 }) => {
-  const LANE_SPACING = 56;
-  const VERTICAL_SPACING = 80;
-  const NODE_VERTICAL_OFFSET = 40;
-  const NODE_RADIUS = 20;
-  const CONNECTION_RADIUS = 18;
-
+  const containerRef = useRef<HTMLDivElement>(null);
+  const timelineRef = useRef<HTMLDivElement>(null);
+  const nodeRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const [contextMenu, setContextMenu] = useState<ContextMenuState>({
     show: false,
     x: 0,
     y: 0,
     commit: null
   });
-  
-  const containerRef = useRef<HTMLDivElement>(null);
 
-  
+  const sortedCommits = useMemo(
+    () => [...commits].sort((a, b) => b.date.getTime() - a.date.getTime()),
+    [commits]
+  );
 
-  const getBranchColor = (branchName: string): string => {
-    const colors = {
-      'main': '#3B82F6',
-      'master': '#3B82F6',
-      'develop': '#10B981',
-      'feature': '#8B5CF6',
-      'hotfix': '#EF4444',
-      'release': '#F59E0B'
-    };
-    
-    for (const [key, color] of Object.entries(colors)) {
-      if (branchName.includes(key)) return color;
-    }
-    
-    // Generate consistent color based on branch name
-    let hash = 0;
-    for (let i = 0; i < branchName.length; i++) {
-      hash = branchName.charCodeAt(i) + ((hash << 5) - hash);
-    }
-    const hue = Math.abs(hash) % 360;
-    return `hsl(${hue}, 70%, 60%)`;
-  };
-  // Generate graph layout with proper branch lanes
-  const { graphNodes, branchLanes } = React.useMemo(() => {
-    const lanes: BranchLane[] = [];
-    const nodes: CommitGraphNode[] = [];
-    const commitToLane: { [commitId: string]: number } = {};
-    
-    // Sort commits by date (newest first)
-    const sortedCommits = [...commits].sort((a, b) => b.date.getTime() - a.date.getTime());
-    
+  // Calculate lanes and connections
+  const {
+    commitLaneInfo,
+    laneCount,
+    branchLegend,
+    connections
+  } = useMemo(() => {
+    const commitIndexMap: Record<string, number> = {};
     sortedCommits.forEach((commit, index) => {
-      const primaryBranch = commit.branches[0] || 'main';
+      commitIndexMap[commit.id] = index;
+    });
 
-      // Find existing lane for this branch or create new one
-      let laneIndex = lanes.findIndex(lane => lane.name === primaryBranch);
+    const chronologicalCommits = [...sortedCommits].reverse();
+    const laneBranchNames: (string | null)[] = [];
+    laneBranchNames[0] = 'main';
 
-      if (laneIndex === -1) {
-        // Create new lane
-        laneIndex = lanes.length;
-        lanes.push({
-          name: primaryBranch,
-          color: getBranchColor(primaryBranch),
-          active: true,
-          lastCommitIndex: index
+    const branchLaneMap = new Map<string, number>();
+    branchLaneMap.set('main', 0);
+    branchLaneMap.set('master', 0);
+
+    const isMainBranch = (branch: string) => branch === 'main' || branch === 'master';
+
+    const findFreeLane = () => {
+      for (let laneIndex = 1; laneIndex < laneBranchNames.length; laneIndex += 1) {
+        if (!laneBranchNames[laneIndex]) {
+          return laneIndex;
+        }
+      }
+      laneBranchNames.push(null);
+      return laneBranchNames.length - 1;
+    };
+
+    const commitLaneInfo: Record<string, CommitLaneInfo> = {};
+    const branchColors = new Map<string, string>();
+    const mergeConnections = new Set<string>();
+
+    chronologicalCommits.forEach((commit) => {
+      const branches = commit.branches.length > 0 ? commit.branches : ['detached'];
+      const primaryBranch =
+        branches.find((branch) => isMainBranch(branch)) ?? branches[0] ?? 'detached';
+
+      let laneIndex: number;
+      if (isMainBranch(primaryBranch)) {
+        laneIndex = 0;
+        if (!branchLaneMap.has(primaryBranch)) {
+          branchLaneMap.set(primaryBranch, 0);
+        }
+        if (!laneBranchNames[0]) {
+          laneBranchNames[0] = primaryBranch;
+        }
+      } else {
+        const existingLane = branchLaneMap.get(primaryBranch);
+        if (existingLane !== undefined) {
+          laneIndex = existingLane;
+        } else {
+          laneIndex = findFreeLane();
+          branchLaneMap.set(primaryBranch, laneIndex);
+          laneBranchNames[laneIndex] = primaryBranch;
+        }
+      }
+
+      commitLaneInfo[commit.id] = { lane: laneIndex, branch: primaryBranch };
+      branchColors.set(primaryBranch, getBranchColor(primaryBranch));
+
+      if (!isMainBranch(primaryBranch)) {
+        laneBranchNames[laneIndex] = primaryBranch;
+      }
+
+      if (commit.parents.length > 1) {
+        commit.parents.forEach((parentId) => {
+          const parentInfo = commitLaneInfo[parentId];
+          if (!parentInfo) {
+            return;
+          }
+          if (parentInfo.lane === laneIndex) {
+            return;
+          }
+          if (parentInfo.lane === 0 && isMainBranch(parentInfo.branch)) {
+            return;
+          }
+
+          mergeConnections.add(`${commit.id}->${parentId}`);
+          branchLaneMap.delete(parentInfo.branch);
+          laneBranchNames[parentInfo.lane] = null;
+        });
+      }
+    });
+
+    const laneCount = laneBranchNames.length;
+
+    const branchLegend: BranchLegendEntry[] = Array.from(branchColors.entries())
+      .filter(([name]) => name !== 'detached')
+      .map(([name, color]) => ({ name, color }))
+      .sort((a, b) => {
+        if (isMainBranch(a.name)) return -1;
+        if (isMainBranch(b.name)) return 1;
+        return a.name.localeCompare(b.name);
+      });
+
+    const connections: GraphConnection[] = [];
+
+    sortedCommits.forEach((commit, fromIndex) => {
+      const fromInfo = commitLaneInfo[commit.id];
+      if (!fromInfo) {
+        return;
+      }
+
+      commit.parents.forEach((parentId) => {
+        const toIndex = commitIndexMap[parentId];
+        const toInfo = commitLaneInfo[parentId];
+
+        if (toIndex === undefined || !toInfo) {
+          return;
+        }
+
+        if (fromInfo.lane === toInfo.lane) {
+          return;
+        }
+
+        const key = `${commit.id}->${parentId}`;
+        const type: GraphConnection['type'] = mergeConnections.has(key)
+          ? 'merge'
+          : 'branch';
+
+        const color =
+          type === 'merge'
+            ? getBranchColor(toInfo.branch)
+            : getBranchColor(fromInfo.branch);
+
+        connections.push({
+          id: `${commit.id}-${parentId}`,
+          fromIndex,
+          toIndex,
+          fromLane: fromInfo.lane,
+          toLane: toInfo.lane,
+          color,
+          type
+        });
+      });
+    });
+
+    return {
+      commitLaneInfo,
+      laneCount,
+      branchLegend,
+      connections
+    };
+  }, [sortedCommits]);
+
+  // Calculate node positions for SVG
+  const ROW_HEIGHT = 64;
+  const COMMIT_NODE_RADIUS = 24;
+  const nodePositions = useMemo(() => {
+    const positions: Record<string, { x: number; y: number; lane: number; row: number }> = {};
+    sortedCommits.forEach((commit, rowIndex) => {
+      const laneIndex = commitLaneInfo[commit.id]?.lane ?? 0;
+      positions[commit.id] = {
+        x: laneIndex * LANE_COLUMN_WIDTH + LANE_COLUMN_WIDTH / 2,
+        y: rowIndex * ROW_HEIGHT + ROW_HEIGHT / 2,
+        lane: laneIndex,
+        row: rowIndex
+      };
+    });
+    return positions;
+  }, [sortedCommits, commitLaneInfo]);
+
+  // SVG connection lines
+  const svgConnections = useMemo(() => {
+    const lines: { id: string; path: string; color: string }[] = [];
+
+    const getAnchors = (pos: { x: number; y: number }) => ({
+      top: { x: pos.x, y: pos.y - COMMIT_NODE_RADIUS },
+      bottom: { x: pos.x, y: pos.y + COMMIT_NODE_RADIUS },
+      left: { x: pos.x - COMMIT_NODE_RADIUS, y: pos.y },
+      right: { x: pos.x + COMMIT_NODE_RADIUS, y: pos.y },
+      center: { x: pos.x, y: pos.y }
+    });
+
+    const laneStates: Record<number, { nextBottom: number; branch: string }> = {};
+
+    sortedCommits.forEach((commit) => {
+      const laneInfo = commitLaneInfo[commit.id];
+      if (!laneInfo) {
+        return;
+      }
+
+      const pos = nodePositions[commit.id];
+      const anchors = getAnchors(pos);
+      const laneState = laneStates[laneInfo.lane];
+
+      if (laneState && laneState.branch === laneInfo.branch) {
+        lines.push({
+          id: `lane-${laneInfo.lane}-${commit.id}`,
+          path: `M ${anchors.top.x} ${anchors.top.y} V ${laneState.nextBottom}`,
+          color: getBranchColor(laneInfo.branch)
+        });
+      }
+
+      laneStates[laneInfo.lane] = {
+        nextBottom: anchors.bottom.y,
+        branch: laneInfo.branch
+      };
+    });
+
+    const CORNER_RADIUS = 10;
+
+    connections.forEach((connection) => {
+      const childCommit = sortedCommits[connection.fromIndex];
+      const parentCommit = sortedCommits[connection.toIndex];
+
+      const childPos = nodePositions[childCommit.id];
+      const parentPos = nodePositions[parentCommit.id];
+
+      if (!childPos || !parentPos) {
+        return;
+      }
+
+      const childAnchors = getAnchors(childPos);
+      const parentAnchors = getAnchors(parentPos);
+
+      const isChildBelowParent = childPos.y > parentPos.y;
+
+      if (connection.type === 'merge') {
+        const startAnchor = isChildBelowParent ? parentAnchors.bottom : parentAnchors.top;
+        const startX = startAnchor.x;
+        const startY = startAnchor.y;
+        const mergeY = childAnchors.right.y;
+        const mergeX = childAnchors.right.x;
+
+        const verticalDelta = mergeY - startY;
+        const horizontalDelta = mergeX - startX;
+        const radius = Math.min(
+          CORNER_RADIUS,
+          Math.abs(verticalDelta),
+          Math.abs(horizontalDelta)
+        );
+
+        if (radius > 0) {
+          const verticalTargetY = mergeY - Math.sign(verticalDelta || 1) * radius;
+          const horizontalStartX = startX + Math.sign(horizontalDelta || 1) * radius;
+
+          lines.push({
+            id: `${connection.id}-${connection.type}`,
+            path: `M ${startX} ${startY} V ${verticalTargetY} Q ${startX} ${mergeY} ${horizontalStartX} ${mergeY} H ${mergeX}`,
+            color: connection.color
+          });
+        } else {
+          lines.push({
+            id: `${connection.id}-${connection.type}`,
+            path: `M ${startX} ${startY} V ${mergeY} H ${mergeX}`,
+            color: connection.color
+          });
+        }
+        return;
+      }
+
+      const startX = parentAnchors.right.x;
+      const startY = parentAnchors.right.y;
+      const endX = childPos.x;
+      const endY = childAnchors.bottom.y;
+
+      const horizontalDelta = endX - startX;
+      const verticalDelta = endY - startY;
+      const radius = Math.min(
+        CORNER_RADIUS,
+        Math.abs(horizontalDelta),
+        Math.abs(verticalDelta)
+      );
+
+      if (radius > 0) {
+        const horizontalTargetX = endX - Math.sign(horizontalDelta || 1) * radius;
+        const verticalStartY = startY + Math.sign(verticalDelta || 1) * radius;
+
+        lines.push({
+          id: `${connection.id}-${connection.type}`,
+          path: `M ${startX} ${startY} H ${horizontalTargetX} Q ${endX} ${startY} ${endX} ${verticalStartY} V ${endY}`,
+          color: connection.color
         });
       } else {
-        // Update existing lane
-        lanes[laneIndex].lastCommitIndex = index;
+        lines.push({
+          id: `${connection.id}-${connection.type}`,
+          path: `M ${startX} ${startY} H ${endX} V ${endY}`,
+          color: connection.color
+        });
       }
-      
-      commitToLane[commit.id] = laneIndex;
-      
-      const node: CommitGraphNode = {
-        commit,
-        x: laneIndex * LANE_SPACING + LANE_SPACING / 2,
-        y: index * VERTICAL_SPACING + NODE_VERTICAL_OFFSET,
-        lane: laneIndex,
-        connections: commit.parents.map(parentId => ({
-          to: parentId,
-          type: commit.parents.length > 1 ? 'merge' : 'parent'
-        }))
-      };
-      
-      nodes.push(node);
     });
-    
-    return { graphNodes: nodes, branchLanes: lanes };
-  }, [commits]);
+
+    return lines;
+  }, [connections, nodePositions, sortedCommits, commitLaneInfo]);
+
+  const registerNodeRef = useCallback(
+    (commitId: string) => (element: HTMLDivElement | null) => {
+      if (element) {
+        nodeRefs.current[commitId] = element;
+      } else {
+        delete nodeRefs.current[commitId];
+      }
+    },
+    []
+  );
 
   const handleContextMenu = useCallback((e: React.MouseEvent, commit: GitCommit) => {
     e.preventDefault();
@@ -136,276 +401,167 @@ export const CommitGraph: React.FC<CommitGraphProps> = ({
     setContextMenu({ show: false, x: 0, y: 0, commit: null });
   }, []);
 
-  const renderConnections = () => {
-    const connections: React.ReactElement[] = [];
-    
-    graphNodes.forEach((node) => {
-      node.connections.forEach((connection) => {
-        const targetNode = graphNodes.find(n => n.commit.id === connection.to);
-        if (!targetNode) return;
-        
-        const startX = node.x;
-        const startY = node.y;
-        const endX = targetNode.x;
-        const endY = targetNode.y;
-
-        const color = getBranchColor(node.commit.branches[0] || 'main');
-        const strokeWidth = connection.type === 'merge' ? 3 : 2;
-        const opacity = connection.type === 'merge' ? 0.8 : 0.6;
-
-        if (startX === endX) {
-          // Straight line for same lane
-          connections.push(
-            <line
-              key={`${node.commit.id}-${connection.to}`}
-              x1={startX}
-              y1={startY + NODE_RADIUS}
-              x2={endX}
-              y2={endY - NODE_RADIUS}
-              stroke={color}
-              strokeWidth={strokeWidth}
-              opacity={opacity}
-              className="transition-all duration-200"
-            />
-          );
-        } else {
-          // 90-degree styled connection for different lanes
-          const startYAdjusted = startY + NODE_RADIUS;
-          const endYAdjusted = endY - NODE_RADIUS;
-          const verticalDirection = endYAdjusted >= startYAdjusted ? 1 : -1;
-          const horizontalDirection = endX > startX ? 1 : -1;
-          const horizontalDistance = Math.abs(endX - startX);
-          const verticalDistance = Math.abs(endYAdjusted - startYAdjusted);
-
-          const maxVerticalCorner = Math.max(verticalDistance / 2 - 4, 0);
-          let cornerRadius = Math.min(
-            CONNECTION_RADIUS,
-            horizontalDistance / 2,
-            maxVerticalCorner
-          );
-
-          if (cornerRadius < 6 && maxVerticalCorner >= 6) {
-            cornerRadius = Math.min(6, horizontalDistance / 2);
-          }
-
-          if (cornerRadius <= 0) {
-            const midY = (startYAdjusted + endYAdjusted) / 2;
-            const path = [
-              `M ${startX} ${startYAdjusted}`,
-              `L ${startX} ${midY}`,
-              `L ${endX} ${midY}`,
-              `L ${endX} ${endYAdjusted}`
-            ].join(' ');
-
-            connections.push(
-              <path
-                key={`${node.commit.id}-${connection.to}`}
-                d={path}
-                stroke={color}
-                strokeWidth={strokeWidth}
-                opacity={opacity}
-                fill="none"
-                className="transition-all duration-200"
-              />
-            );
-            return;
-          }
-
-          const midY = (startYAdjusted + endYAdjusted) / 2;
-          const firstCornerY = midY - verticalDirection * cornerRadius;
-          const secondCornerY = midY + verticalDirection * cornerRadius;
-          const firstCornerX = startX + horizontalDirection * cornerRadius;
-          const secondCornerX = endX - horizontalDirection * cornerRadius;
-
-          const path = [
-            `M ${startX} ${startYAdjusted}`,
-            `L ${startX} ${firstCornerY}`,
-            `Q ${startX} ${midY} ${firstCornerX} ${midY}`,
-            `L ${secondCornerX} ${midY}`,
-            `Q ${endX} ${midY} ${endX} ${secondCornerY}`,
-            `L ${endX} ${endYAdjusted}`
-          ].join(' ');
-
-          connections.push(
-            <path
-              key={`${node.commit.id}-${connection.to}`}
-              d={path}
-              stroke={color}
-              strokeWidth={strokeWidth}
-              opacity={opacity}
-              fill="none"
-              className="transition-all duration-200"
-            />
-          );
-        }
-      });
-    });
-    
-    return connections;
-  };
-
-  const renderBranchLanes = () => {
-    return branchLanes.map((lane, index) => (
-      <div
-        key={lane.name}
-        className="absolute top-0 bottom-0 flex flex-col items-center"
-        style={{ left: index * LANE_SPACING + LANE_SPACING / 2, width: LANE_SPACING }}
-      >
-        {/* Branch line */}
-        <div
-          className="w-0.5 h-full opacity-30"
-          style={{ backgroundColor: lane.color }}
-        />
-      </div>
-    ));
-  };
-
   useEffect(() => {
-    const handleClick = (e: MouseEvent) => {
-      if (contextMenu.show && containerRef.current && !containerRef.current.contains(e.target as Node)) {
+    const handleGlobalClick = (event: MouseEvent) => {
+      if (
+        contextMenu.show &&
+        containerRef.current &&
+        !containerRef.current.contains(event.target as Node)
+      ) {
         handleCloseContextMenu();
       }
     };
-    
-    document.addEventListener('click', handleClick);
-    return () => document.removeEventListener('click', handleClick);
+    document.addEventListener('click', handleGlobalClick);
+    return () => document.removeEventListener('click', handleGlobalClick);
   }, [contextMenu.show, handleCloseContextMenu]);
 
-  const maxNodeX = graphNodes.length > 0 ? Math.max(...graphNodes.map(n => n.x)) : 0;
-  const maxNodeY = graphNodes.length > 0 ? Math.max(...graphNodes.map(n => n.y)) : 0;
-  const maxX = maxNodeX + 200;
-  const maxY = maxNodeY + 100;
-  const branchColumnWidth = 200;
+  const timelineColumns = useMemo(
+    () =>
+      laneCount > 0 ? `repeat(${laneCount}, ${LANE_COLUMN_WIDTH}px)` : '1fr',
+    [laneCount]
+  );
+
+  const renderLaneCell = (commit: GitCommit, laneIndex: number) => {
+    const laneInfo = commitLaneInfo[commit.id];
+    const isCommitLane = laneInfo?.lane === laneIndex;
+    const branchColor = laneInfo ? getBranchColor(laneInfo.branch) : '#6B7280';
+
+    return (
+      <div
+        key={`lane-${laneIndex}`}
+        className="relative flex items-center justify-center"
+        style={{ height: ROW_HEIGHT }}
+      >
+        {isCommitLane && (
+          <div ref={registerNodeRef(commit.id)} className="relative z-20 flex items-center justify-center" style={{ height: ROW_HEIGHT }}>
+            <CommitNode
+              commit={commit}
+              branchColor={branchColor}
+              onClick={() => onCommitClick(commit)}
+              onContextMenu={(event) => handleContextMenu(event, commit)}
+            />
+          </div>
+        )}
+      </div>
+    );
+  };
 
   return (
-    <div className="flex-1 bg-gray-900 overflow-auto relative flex" ref={containerRef}>
-      {/* Branch Column */}
-      <div 
-        className="bg-gray-800 border-r border-gray-700 flex-shrink-0 overflow-hidden"
-        style={{ width: branchColumnWidth }}
-      >
-        <div className="p-4 border-b border-gray-700">
-          <h3 className="text-sm font-medium text-gray-300 flex items-center">
-            <GitBranch className="w-4 h-4 mr-2" />
-            Branches
-          </h3>
+    <div className="flex-1 bg-gray-900 text-gray-100" ref={containerRef}>
+      <div className="flex h-full overflow-auto">
+        <div className="w-56 flex-shrink-0 border-r border-gray-800 bg-gray-900/80">
+          <div className="border-b border-gray-800 px-4 py-3">
+            <h3 className="flex items-center text-sm font-medium text-gray-300">
+              <GitBranch className="mr-2 h-4 w-4" />
+              Branches
+            </h3>
+          </div>
+          <div className="space-y-3 px-4 py-4">
+            {branchLegend.map((lane) => (
+              <div key={lane.name} className="flex items-center gap-3">
+                <span
+                  className="h-3 w-3 rounded-full"
+                  style={{ backgroundColor: lane.color }}
+                />
+                <span className="truncate text-sm font-medium" style={{ color: lane.color }}>
+                  {lane.name}
+                </span>
+              </div>
+            ))}
+            {branchLegend.length === 0 && (
+              <div className="text-sm text-gray-500">No branches detected</div>
+            )}
+          </div>
         </div>
-        
-        <div className="relative" style={{ height: maxY }}>
-          {branchLanes.map((lane, index) => (
-            <div
-              key={lane.name}
-              className="absolute flex items-center px-4 py-2"
-              style={{
-                top: NODE_VERTICAL_OFFSET,
-                left: 0,
-                right: 0,
-                transform: `translateY(${index * VERTICAL_SPACING}px)`
-              }}
-            >
-              <div
-                className="w-3 h-3 rounded-full mr-3 flex-shrink-0"
-                style={{ backgroundColor: lane.color }}
-              />
-              <span 
-                className="text-sm font-medium truncate"
-                style={{ color: lane.color }}
-                title={lane.name}
-              >
-                {lane.name}
-              </span>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* Graph Area */}
-      <div className="flex-1 relative">
-        <div 
-          className="relative"
-          style={{ 
-            width: Math.max(maxX - branchColumnWidth, 600), 
-            height: Math.max(maxY, 600),
-            minWidth: '100%'
-          }}
-        >
-          {/* Branch lane lines */}
-          {renderBranchLanes()}
-          
-          {/* Connection lines */}
-          <svg
-            width={maxX - branchColumnWidth}
-            height={maxY}
-            className="absolute inset-0"
-            style={{ pointerEvents: 'none' }}
+        <div className="flex-1 overflow-auto">
+          <div
+            ref={timelineRef}
+            className="relative min-w-full divide-y divide-gray-800"
+            style={{ height: sortedCommits.length * ROW_HEIGHT }}
           >
-            <defs>
-              <filter id="glow">
-                <feGaussianBlur stdDeviation="3" result="coloredBlur"/>
-                <feMerge> 
-                  <feMergeNode in="coloredBlur"/>
-                  <feMergeNode in="SourceGraphic"/>
-                </feMerge>
-              </filter>
-            </defs>
-            {renderConnections()}
-          </svg>
-          
-          {/* Commit nodes */}
-          {graphNodes.map((node) => (
-            <div
-              key={node.commit.id}
-              className="absolute transform -translate-x-1/2 -translate-y-1/2"
-              style={{ left: node.x, top: node.y }}
+            {/* SVG overlay for all connections */}
+            <svg
+              className="pointer-events-none absolute inset-0 z-10"
+              width={laneCount * LANE_COLUMN_WIDTH}
+              height={sortedCommits.length * ROW_HEIGHT}
+              viewBox={`0 0 ${laneCount * LANE_COLUMN_WIDTH} ${sortedCommits.length * ROW_HEIGHT}`}
             >
-              <CommitNode
-                commit={node.commit}
-                branchColor={getBranchColor(node.commit.branches[0] || 'main')}
-                onClick={() => onCommitClick(node.commit)}
-                onContextMenu={(e) => handleContextMenu(e, node.commit)}
-              />
-              
-              {/* Tags */}
-              {node.commit.tags.map((tag, idx) => (
-                <div
-                  key={tag}
-                  className="absolute -top-8 left-full ml-4 bg-yellow-600 text-yellow-100 px-2 py-1 rounded text-xs font-medium flex items-center whitespace-nowrap z-10"
-                  style={{ transform: `translateY(${idx * -24}px)` }}
-                >
-                  <Tag className="w-3 h-3 mr-1" />
-                  {tag}
-                </div>
+              {svgConnections.map((line) => (
+                <path
+                  key={line.id}
+                  d={line.path}
+                  stroke={line.color}
+                  strokeWidth={4}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  fill="none"
+                  opacity={1}
+                />
               ))}
-              
-              {/* Commit message */}
+            </svg>
+            {sortedCommits.map((commit) => (
               <div
-                className="absolute left-full ml-4 top-1/2 transform -translate-y-1/2 text-sm text-gray-300 whitespace-nowrap max-w-md truncate"
-                title={node.commit.message}
+                key={commit.id}
+                className="grid border-b border-gray-800 bg-gray-900/60 hover:bg-gray-900 transition-colors"
+                style={{ gridTemplateColumns: `${timelineColumns} minmax(0, 1fr)`, height: ROW_HEIGHT }}
               >
-                {node.commit.message}
+                {laneCount > 0 ? (
+                  Array.from({ length: laneCount }, (_, laneIndex) =>
+                    renderLaneCell(commit, laneIndex)
+                  )
+                ) : (
+                  <div style={{ height: ROW_HEIGHT }} />
+                )}
+                <div className="flex flex-col gap-2 py-4 pr-6">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={() => onCommitClick(commit)}
+                      onContextMenu={(event) => handleContextMenu(event, commit)}
+                      className="text-left text-sm font-semibold text-gray-100 hover:text-white"
+                    >
+                      {commit.message}
+                    </button>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {commit.branches.map((branch) => (
+                        <span
+                          key={`${commit.id}-${branch}`}
+                          className="px-2 py-0.5 text-xs font-medium rounded-full border"
+                          style={{
+                            borderColor: getBranchColor(branch),
+                            color: getBranchColor(branch)
+                          }}
+                        >
+                          {branch}
+                        </span>
+                      ))}
+                      {commit.tags.map((tag) => (
+                        <span
+                          key={`${commit.id}-${tag}`}
+                          className="inline-flex items-center gap-1 rounded-full bg-yellow-600/20 px-2 py-0.5 text-xs font-medium text-yellow-200"
+                        >
+                          <Tag className="h-3 w-3" />
+                          {tag}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-gray-400">
+                    <span className="font-mono text-gray-300">{commit.shortHash}</span>
+                    <span>{commit.author.name}</span>
+                    <span>
+                      {commit.date.toLocaleDateString()} {commit.date.toLocaleTimeString()}
+                    </span>
+                    <span className="text-green-400">
+                      +{commit.stats.additions}
+                    </span>
+                    <span className="text-red-400">-{commit.stats.deletions}</span>
+                    <span>{commit.files.length} file{commit.files.length === 1 ? '' : 's'}</span>
+                  </div>
+                </div>
               </div>
-              
-              {/* Commit metadata */}
-              <div className="absolute left-full ml-4 top-1/2 transform -translate-y-1/2 translate-y-4 text-xs text-gray-500 whitespace-nowrap">
-                <span className="font-mono mr-2">{node.commit.shortHash}</span>
-                <span className="mr-2">{node.commit.author.name}</span>
-                <span>{node.commit.date.toLocaleDateString()}</span>
-              </div>
-            </div>
-          ))}
-          
-          {contextMenu.show && contextMenu.commit && (
-            <ContextMenu
-              x={contextMenu.x - branchColumnWidth}
-              y={contextMenu.y}
-              commit={contextMenu.commit}
-              onReset={onReset}
-              onCherryPick={onCherryPick}
-              onRevert={onRevert}
-              onCreateBranch={onCreateBranch}
-              onClose={handleCloseContextMenu}
-            />
-          )}
+            ))}
+          </div>
         </div>
       </div>
     </div>
