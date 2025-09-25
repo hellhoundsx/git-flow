@@ -5,12 +5,13 @@ import React, {
   useRef,
   useEffect
 } from 'react';
-import { GitCommit } from '../types/git';
+import { GitCommit, GitBranch as BranchSummary } from '../types/git';
 import { CommitNode } from './CommitNode';
-import { GitBranch, Tag } from 'lucide-react';
+import { GitBranch as BranchIcon, Tag, Cloud } from 'lucide-react';
 
 interface CommitGraphProps {
   commits: GitCommit[];
+  branches: BranchSummary[];
   onCommitClick: (commit: GitCommit) => void;
 }
 
@@ -36,12 +37,15 @@ interface CommitLaneInfo {
   branch: string;
 }
 
-interface BranchLegendEntry {
-  name: string;
+interface BranchMarker {
+  id: string;
+  label: string;
+  type: 'local' | 'remote';
   color: string;
 }
 
 const LANE_COLUMN_WIDTH = 72;
+const BRANCH_COLUMN_WIDTH = 180;
 
 const getBranchColor = (branchName: string): string => {
   const predefined: Record<string, string> = {
@@ -90,7 +94,7 @@ export const CommitGraph: React.FC<CommitGraphProps> = ({
   const {
     commitLaneInfo,
     laneCount,
-    branchLegend,
+    branchColors,
     connections
   } = useMemo(() => {
     const commitIndexMap: Record<string, number> = {};
@@ -176,15 +180,6 @@ export const CommitGraph: React.FC<CommitGraphProps> = ({
 
     const laneCount = laneBranchNames.length;
 
-    const branchLegend: BranchLegendEntry[] = Array.from(branchColors.entries())
-      .filter(([name]) => name !== 'detached')
-      .map(([name, color]) => ({ name, color }))
-      .sort((a, b) => {
-        if (isMainBranch(a.name)) return -1;
-        if (isMainBranch(b.name)) return 1;
-        return a.name.localeCompare(b.name);
-      });
-
     const connections: GraphConnection[] = [];
 
     sortedCommits.forEach((commit, fromIndex) => {
@@ -230,7 +225,7 @@ export const CommitGraph: React.FC<CommitGraphProps> = ({
     return {
       commitLaneInfo,
       laneCount,
-      branchLegend,
+      branchColors,
       connections
     };
   }, [sortedCommits]);
@@ -376,6 +371,87 @@ export const CommitGraph: React.FC<CommitGraphProps> = ({
     return lines;
   }, [connections, nodePositions, sortedCommits, commitLaneInfo]);
 
+  const branchHeadsByName = useMemo(() => {
+    const lookup = new Map<string, string>();
+    sortedCommits.forEach((commit) => {
+      commit.branches.forEach((branchName) => {
+        if (!lookup.has(branchName)) {
+          lookup.set(branchName, commit.id);
+        }
+      });
+    });
+    return lookup;
+  }, [sortedCommits]);
+
+  const branchMarkersByCommit = useMemo(() => {
+    const markers: Record<string, BranchMarker[]> = {};
+
+    const commitMap = new Map<string, GitCommit>();
+    sortedCommits.forEach((commit) => {
+      commitMap.set(commit.id, commit);
+    });
+
+    const ensureMarkerList = (commitId: string) => {
+      if (!markers[commitId]) {
+        markers[commitId] = [];
+      }
+      return markers[commitId];
+    };
+
+    const getAncestorBySteps = (startId: string, steps: number): string | undefined => {
+      let currentId: string | undefined = startId;
+      for (let step = 0; step < steps; step += 1) {
+        const commit = currentId ? commitMap.get(currentId) : undefined;
+        if (!commit || commit.parents.length === 0) {
+          return currentId;
+        }
+        currentId = commit.parents[0];
+      }
+      return currentId;
+    };
+
+    branches.forEach((branch) => {
+      const localColor = branchColors.get(branch.name) ?? getBranchColor(branch.name);
+
+      if (branch.lastCommit) {
+        const localMarkers = ensureMarkerList(branch.lastCommit);
+        localMarkers.push({
+          id: `${branch.name}-local`,
+          label: branch.name,
+          type: 'local',
+          color: localColor
+        });
+      }
+
+      if (branch.upstream) {
+        const upstreamCommitId =
+          branchHeadsByName.get(branch.upstream) ??
+          (branch.ahead > 0 && branch.lastCommit
+            ? getAncestorBySteps(branch.lastCommit, branch.ahead)
+            : undefined);
+
+        if (upstreamCommitId) {
+          const remoteColor = branchColors.get(branch.upstream) ?? localColor;
+          const remoteMarkers = ensureMarkerList(upstreamCommitId);
+          remoteMarkers.push({
+            id: `${branch.upstream}-remote`,
+            label: branch.upstream,
+            type: 'remote',
+            color: remoteColor
+          });
+        }
+      }
+    });
+
+    Object.values(markers).forEach((markerList) => {
+      markerList.sort((a, b) => a.label.localeCompare(b.label));
+    });
+
+    return markers;
+    // Including `branches` keeps the markers in sync with updates from the dashboard data source.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [branches, branchColors, branchHeadsByName, sortedCommits]);
+
   const registerNodeRef = useCallback(
     (commitId: string) => (element: HTMLDivElement | null) => {
       if (element) {
@@ -446,42 +522,48 @@ export const CommitGraph: React.FC<CommitGraphProps> = ({
     );
   };
 
+  const renderBranchColumn = (commit: GitCommit) => {
+    const markers = branchMarkersByCommit[commit.id] ?? [];
+
+    return (
+      <div className="flex h-full items-center justify-end gap-2 border-r border-gray-800 bg-gray-900/70 px-3">
+        {markers.map((marker) => {
+          const Icon = marker.type === 'remote' ? Cloud : BranchIcon;
+          const markerTitle = marker.type === 'remote'
+            ? `Remote branch ${marker.label}`
+            : `Local branch ${marker.label}`;
+
+          return (
+            <span
+              key={marker.id}
+              title={markerTitle}
+              className="inline-flex items-center gap-1 rounded-full border px-2 py-1 text-xs font-medium bg-gray-900/80"
+              style={{
+                borderColor: marker.color,
+                color: marker.color
+              }}
+            >
+              <Icon className="h-3 w-3" />
+              <span className="max-w-[7.5rem] truncate">{marker.label}</span>
+            </span>
+          );
+        })}
+      </div>
+    );
+  };
+
   return (
     <div className="flex-1 bg-gray-900 text-gray-100" ref={containerRef}>
-      <div className="flex h-full overflow-auto">
-        <div className="w-56 flex-shrink-0 border-r border-gray-800 bg-gray-900/80">
-          <div className="border-b border-gray-800 px-4 py-3">
-            <h3 className="flex items-center text-sm font-medium text-gray-300">
-              <GitBranch className="mr-2 h-4 w-4" />
-              Branches
-            </h3>
-          </div>
-          <div className="space-y-3 px-4 py-4">
-            {branchLegend.map((lane) => (
-              <div key={lane.name} className="flex items-center gap-3">
-                <span
-                  className="h-3 w-3 rounded-full"
-                  style={{ backgroundColor: lane.color }}
-                />
-                <span className="truncate text-sm font-medium" style={{ color: lane.color }}>
-                  {lane.name}
-                </span>
-              </div>
-            ))}
-            {branchLegend.length === 0 && (
-              <div className="text-sm text-gray-500">No branches detected</div>
-            )}
-          </div>
-        </div>
-        <div className="flex-1 overflow-auto">
-          <div
-            ref={timelineRef}
-            className="relative min-w-full divide-y divide-gray-800"
-            style={{ height: sortedCommits.length * ROW_HEIGHT }}
-          >
+      <div className="h-full overflow-auto">
+        <div
+          ref={timelineRef}
+          className="relative min-w-full divide-y divide-gray-800"
+          style={{ height: sortedCommits.length * ROW_HEIGHT }}
+        >
             {/* SVG overlay for all connections */}
             <svg
-              className="pointer-events-none absolute inset-0 z-10"
+              className="pointer-events-none absolute top-0 z-10"
+              style={{ left: BRANCH_COLUMN_WIDTH }}
               width={laneCount * LANE_COLUMN_WIDTH}
               height={sortedCommits.length * ROW_HEIGHT}
               viewBox={`0 0 ${laneCount * LANE_COLUMN_WIDTH} ${sortedCommits.length * ROW_HEIGHT}`}
@@ -503,8 +585,12 @@ export const CommitGraph: React.FC<CommitGraphProps> = ({
               <div
                 key={commit.id}
                 className="grid border-b border-gray-800 bg-gray-900/60 hover:bg-gray-900 transition-colors"
-                style={{ gridTemplateColumns: `${timelineColumns} minmax(0, 1fr)`, height: ROW_HEIGHT }}
+                style={{
+                  gridTemplateColumns: `${BRANCH_COLUMN_WIDTH}px ${timelineColumns} minmax(0, 1fr)`,
+                  height: ROW_HEIGHT
+                }}
               >
+                {renderBranchColumn(commit)}
                 {laneCount > 0 ? (
                   Array.from({ length: laneCount }, (_, laneIndex) =>
                     renderLaneCell(commit, laneIndex)
@@ -561,7 +647,6 @@ export const CommitGraph: React.FC<CommitGraphProps> = ({
                 </div>
               </div>
             ))}
-          </div>
         </div>
       </div>
     </div>

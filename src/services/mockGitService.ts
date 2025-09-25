@@ -134,7 +134,7 @@ export class MockGitService {
         author: { name: 'John Doe', email: 'john@example.com' },
         date: new Date('2024-01-06T10:00:00Z'),
         parents: ['3', '5'],
-        branches: ['main'],
+        branches: ['main', 'origin/main'],
         tags: ['v1.1.0'],
         files: [],
         stats: { additions: 0, deletions: 0, total: 0 }
@@ -189,7 +189,7 @@ export class MockGitService {
         author: { name: 'Jane Smith', email: 'jane@example.com' },
         date: new Date('2024-01-08T11:45:00Z'),
         parents: ['8'],
-        branches: ['hotfix/critical-bug'],
+        branches: ['hotfix/critical-bug', 'origin/hotfix/critical-bug'],
         tags: [],
         files: [
           {
@@ -279,12 +279,12 @@ export class MockGitService {
         lastCommit: '12'
       },
       {
-        name: 'hotfix/security-patch',
+        name: 'hotfix/critical-bug',
         current: false,
-        upstream: 'origin/hotfix/security-patch',
+        upstream: 'origin/hotfix/critical-bug',
         remote: 'origin',
         ahead: 0,
-        behind: 3,
+        behind: 0,
         lastCommit: '9'
       }
     ];
