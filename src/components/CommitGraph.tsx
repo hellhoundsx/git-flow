@@ -290,6 +290,8 @@ export const CommitGraph: React.FC<CommitGraphProps> = ({
       };
     });
 
+    const CORNER_RADIUS = 10;
+
     connections.forEach((connection) => {
       const childCommit = sortedCommits[connection.fromIndex];
       const parentCommit = sortedCommits[connection.toIndex];
@@ -313,11 +315,30 @@ export const CommitGraph: React.FC<CommitGraphProps> = ({
         const mergeY = childAnchors.right.y;
         const mergeX = childAnchors.right.x;
 
-        lines.push({
-          id: `${connection.id}-${connection.type}`,
-          path: `M ${startX} ${startY} V ${mergeY} H ${mergeX}`,
-          color: connection.color
-        });
+        const verticalDelta = mergeY - startY;
+        const horizontalDelta = mergeX - startX;
+        const radius = Math.min(
+          CORNER_RADIUS,
+          Math.abs(verticalDelta),
+          Math.abs(horizontalDelta)
+        );
+
+        if (radius > 0) {
+          const verticalTargetY = mergeY - Math.sign(verticalDelta || 1) * radius;
+          const horizontalStartX = startX + Math.sign(horizontalDelta || 1) * radius;
+
+          lines.push({
+            id: `${connection.id}-${connection.type}`,
+            path: `M ${startX} ${startY} V ${verticalTargetY} Q ${startX} ${mergeY} ${horizontalStartX} ${mergeY} H ${mergeX}`,
+            color: connection.color
+          });
+        } else {
+          lines.push({
+            id: `${connection.id}-${connection.type}`,
+            path: `M ${startX} ${startY} V ${mergeY} H ${mergeX}`,
+            color: connection.color
+          });
+        }
         return;
       }
 
@@ -326,11 +347,30 @@ export const CommitGraph: React.FC<CommitGraphProps> = ({
       const endX = childPos.x;
       const endY = childAnchors.bottom.y;
 
-      lines.push({
-        id: `${connection.id}-${connection.type}`,
-        path: `M ${startX} ${startY} H ${endX} V ${endY}`,
-        color: connection.color
-      });
+      const horizontalDelta = endX - startX;
+      const verticalDelta = endY - startY;
+      const radius = Math.min(
+        CORNER_RADIUS,
+        Math.abs(horizontalDelta),
+        Math.abs(verticalDelta)
+      );
+
+      if (radius > 0) {
+        const horizontalTargetX = endX - Math.sign(horizontalDelta || 1) * radius;
+        const verticalStartY = startY + Math.sign(verticalDelta || 1) * radius;
+
+        lines.push({
+          id: `${connection.id}-${connection.type}`,
+          path: `M ${startX} ${startY} H ${horizontalTargetX} Q ${endX} ${startY} ${endX} ${verticalStartY} V ${endY}`,
+          color: connection.color
+        });
+      } else {
+        lines.push({
+          id: `${connection.id}-${connection.type}`,
+          path: `M ${startX} ${startY} H ${endX} V ${endY}`,
+          color: connection.color
+        });
+      }
     });
 
     return lines;
